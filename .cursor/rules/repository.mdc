@@ -1,0 +1,9 @@
+---
+description: Mandatory OWASP TIET Quiz Portal repository rules
+alwaysApply: true
+---
+
+Read `/CLAUDE.md` completely before proposing or editing code. It is the canonical instruction set for architecture, implementation order, module boundaries, API/database contracts, security, testing, and documentation.
+
+Do not start coding until its mandatory preflight and required document reading are complete.
+

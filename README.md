@@ -6,6 +6,7 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 
 ## Design Documentation
 
+- [Repository and AI contributor instructions](CLAUDE.md)
 - [High-level design](docs/hld.md)
 - [Database design](docs/database-design.md)
 - [API contract](docs/api-contract.md)
@@ -246,31 +247,84 @@ Private question images are delivered using short-lived signed URLs. Student API
 ## Planned Feature Structure
 
 ```text
-prisma/
-|-- schema.prisma
-`-- migrations/
-
-src/
-|-- modules/
-|   |-- auth/
-|   |-- users/
-|   |-- quizzes/
-|   |-- attempts/
-|   `-- violations/
-|-- middleware/
-|-- lib/
-|   |-- prisma.ts
-|   `-- supabase.ts
-|-- shared/
-|   |-- config/
-|   |-- errors/
-|   |-- logging/
-|   `-- security/
-|-- app.ts
-`-- server.ts
+.
+|-- CLAUDE.md
+|-- AGENTS.md
+|-- README.md
+|-- package.json
+|-- pnpm-lock.yaml
+|-- tsconfig.json
+|-- .env.example
+|-- docs/
+|   |-- hld.md
+|   |-- database-design.md
+|   |-- api-contract.md
+|   |-- openapi.yaml
+|   `-- engineering.md
+|-- prisma/
+|   |-- schema.prisma
+|   `-- migrations/
+|-- src/
+|   |-- modules/
+|   |   |-- auth/
+|   |   |   |-- middleware.ts
+|   |   |   |-- service.ts
+|   |   |   `-- service.test.ts
+|   |   |-- users/
+|   |   |   |-- routes.ts
+|   |   |   |-- schema.ts
+|   |   |   |-- service.ts
+|   |   |   `-- service.test.ts
+|   |   |-- quizzes/
+|   |   |   |-- routes.ts
+|   |   |   |-- schema.ts
+|   |   |   |-- service.ts
+|   |   |   `-- service.test.ts
+|   |   |-- attempts/
+|   |   |   |-- routes.ts
+|   |   |   |-- schema.ts
+|   |   |   |-- service.ts
+|   |   |   |-- queries.ts
+|   |   |   `-- service.test.ts
+|   |   `-- violations/
+|   |       |-- routes.ts
+|   |       |-- schema.ts
+|   |       |-- service.ts
+|   |       `-- service.test.ts
+|   |-- middleware/
+|   |   |-- error-handler.ts
+|   |   |-- not-found.ts
+|   |   `-- request-id.ts
+|   |-- lib/
+|   |   |-- prisma.ts
+|   |   `-- supabase.ts
+|   |-- shared/
+|   |   |-- config/
+|   |   |   `-- env.ts
+|   |   |-- errors/
+|   |   |   `-- problem.ts
+|   |   |-- logging/
+|   |   |   `-- logger.ts
+|   |   `-- security/
+|   |       |-- cors.ts
+|   |       `-- rate-limit.ts
+|   |-- app.ts
+|   `-- server.ts
+|-- tests/
+|   |-- integration/
+|   `-- load/
+|-- .github/
+|   |-- workflows/
+|   |   `-- ci.yml
+|   |-- copilot-instructions.md
+|   `-- pull_request_template.md
+|-- .cursor/
+|   `-- rules/
+|       `-- repository.mdc
+`-- .windsurfrules
 ```
 
-Each module starts with `routes.ts`, `schema.ts`, `service.ts`, and tests. A `queries.ts` file is added only for the revision-aware answer upsert or another measured need. Types are inferred from Zod and Prisma instead of duplicated manually. Admin endpoints live with the feature they manage rather than forming a separate domain module.
+This is the target structure, not permission to create empty placeholders. Add files as their vertical slice is implemented. Most HTTP modules use `routes.ts`, `schema.ts`, `service.ts`, and tests. `auth` uses middleware because Supabase owns login, and `attempts/queries.ts` contains the single revision-aware answer upsert. Types are inferred from Zod and Prisma instead of duplicated manually. Admin endpoints live with the feature they manage rather than forming a separate domain module.
 
 ## Planned Technical Stack
 

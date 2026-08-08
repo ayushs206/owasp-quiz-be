@@ -1,0 +1,3 @@
+Read `CLAUDE.md` completely before proposing or editing code. Treat it as the canonical repository instruction set and follow its mandatory preflight, architecture invariants, module boundaries, API/database contracts, security rules, testing requirements, and definition of done.
+
+Do not introduce deferred infrastructure or undocumented architectural changes.
