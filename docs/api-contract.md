@@ -242,13 +242,11 @@ Accepts at most 20 events per request.
   "events": [
     {
       "eventId": "uuid",
-      "source": "ML",
-      "type": "MULTIPLE_FACES",
-      "confidence": 0.98,
-      "durationMs": 4200,
-      "detectorVersion": "face-detector-1",
+      "type": "TAB_HIDDEN",
       "occurredAt": "2026-08-08T10:10:00Z",
-      "metadata": {}
+      "metadata": {
+        "hiddenDurationMs": 4200
+      }
     }
   ]
 }
@@ -265,6 +263,8 @@ Response:
 ```
 
 `action` is one of `NONE`, `WARNING`, `FINAL_WARNING`, or `FORCE_SUBMITTED`.
+
+This endpoint does not accept camera frames, audio, recordings, face data, confidence values, or ML output. Camera permission and the live preview are frontend-only behavior.
 
 ### `POST /v1/attempts/:attemptId/submit`
 

@@ -114,10 +114,7 @@ erDiagram
         uuid id PK
         uuid attempt_id FK
         uuid client_event_id UK
-        violation_source source
         string type
-        decimal confidence
-        int duration_ms
         boolean qualifies
         int sequence_number
     }
@@ -134,7 +131,6 @@ erDiagram
 | `attempt_status` | `IN_PROGRESS`, `SUBMITTED` |
 | `submission_reason` | `USER`, `EXPIRED`, `VIOLATION`, `ADMIN` |
 | `review_status` | `NOT_REQUIRED`, `PENDING`, `APPROVED`, `DISQUALIFIED` |
-| `violation_source` | `BROWSER`, `ML` |
 
 ## Tables
 
@@ -295,11 +291,7 @@ Constraints:
 | `id` | `uuid` | Primary key. |
 | `attempt_id` | `uuid` | References `attempts.id`. |
 | `client_event_id` | `uuid` | Client-generated event ID; unique per attempt. |
-| `source` | `violation_source` | Browser rule or ML. |
-| `type` | `text` | Stable event identifier. |
-| `confidence` | `numeric(5,4)` | Nullable for browser events. |
-| `duration_ms` | `integer` | Nullable. |
-| `detector_version` | `text` | Nullable for browser events. |
+| `type` | `text` | Stable browser-event identifier. |
 | `client_occurred_at` | `timestamptz` | Client-reported event time. |
 | `received_at` | `timestamptz` | Server time. |
 | `metadata` | `jsonb` | Validated, size-limited metadata. |
@@ -406,5 +398,5 @@ Retention periods must be approved before production. Until then:
 - Keep attempts, answers, and scores according to institutional policy.
 - Restrict phone-number access to the student and authorized admins; never include it in logs, exports, results, or leaderboards unless explicitly approved.
 - Keep violation metadata only as long as required for review and institutional policy.
-- Do not store camera video.
+- Do not store camera video, frames, audio, camera-derived metadata, or ML output.
 - Remove signed media URLs from logs; store only stable private object paths.

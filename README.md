@@ -20,7 +20,7 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 - Keep PostgreSQL as the authoritative source of quiz data.
 - Enforce quiz timing and authorization on the backend.
 - Persist answers and scores synchronously; calculate the leaderboard with a database query after quiz closure.
-- Collect anti-cheating signals without continuously uploading camera footage.
+- Show a local live camera preview without recording, storing, analyzing, or uploading camera data.
 
 ## Target Architecture
 
@@ -115,7 +115,7 @@ Students must appear in an imported quiz roster and complete onboarding. A valid
 | `attempts` | Student attempt state, timing, submission, score totals, and review status |
 | `attempt_questions` | Immutable question and randomized option-order snapshot |
 | `answers` | Latest persisted selection and monotonic revision per question |
-| `violations` | Browser/ML events, qualification decision, and warning sequence |
+| `violations` | Browser events, qualification decision, and warning sequence |
 
 Important constraints include:
 
@@ -186,20 +186,16 @@ Every question/answer request enforces expiry. The API finalizes an expired atte
 
 Queues and background workers are intentionally excluded from version one. They will be reconsidered only if load testing proves the simple API/database path cannot meet the target.
 
-## Anti-Cheating and Violation Enforcement
+## Camera and Violation Enforcement
 
-Camera analysis runs in the browser through MediaPipe or TensorFlow.js. Continuous video is never streamed to the backend. The client sends suspicious-event metadata such as detector version, event type, confidence, duration, and timestamps.
+The frontend requests video-only camera permission before the quiz begins and shows the student a muted live preview. The stream stays inside the browser: no recording is created, no frames or audio are stored, no ML runs, and no camera data or camera-derived metadata is sent to the backend. If permission is denied or the stream cannot start, the frontend blocks quiz start and shows a clear recovery message.
 
-Potential signals include:
+Backend violations are limited to ordinary browser events:
 
-- No face or multiple faces.
-- Sustained looking away or abnormal head movement.
 - Tab visibility changes.
 - Fullscreen exits.
 - Copy or paste attempts.
-- Other supported browser integrity signals.
-
-Webcam ML cannot be guaranteed to be 100% accurate. Lighting, camera quality, accessibility requirements, occlusion, model bias, and modified clients can produce false results. Enforcement therefore uses configurable, calibrated, and reviewable violations.
+- Other explicitly configured browser integrity events.
 
 ### Enforcement policy
 
@@ -208,9 +204,7 @@ Webcam ML cannot be guaranteed to be 100% accurate. Lighting, camera quality, ac
 - Incident 5: persist the violation, force-submit the attempt, block re-entry, and flag it for admin review.
 - An admin makes the final validity or disqualification decision.
 
-A browser-rule event may qualify directly. An ML event qualifies only when it satisfies the configured confidence and duration policy; the initial target is confidence of at least `0.95` sustained for at least three seconds. Repeated events of the same type are deduplicated within a configurable cooldown.
-
-New or materially changed detectors must run in shadow mode and be evaluated for false positives before they can contribute to automatic removal. Enforcement remains configurable by event type and all admin overrides are logged.
+Repeated events of the same type are deduplicated within a configurable cooldown. Enforcement remains configurable by event type and all admin overrides are logged.
 
 ## API Overview
 
@@ -229,7 +223,7 @@ All endpoints are versioned under `/v1` and use standardized RFC 7807 problem re
 | `GET` | `/v1/attempts/:attemptId/questions/:displayOrder` | Current question and randomized options |
 | `PUT` | `/v1/attempts/:attemptId/answers/:questionId` | Persist an answer revision |
 | `POST` | `/v1/attempts/:attemptId/answers/sync` | Synchronize an offline answer batch |
-| `POST` | `/v1/attempts/:attemptId/violations` | Record browser or ML events |
+| `POST` | `/v1/attempts/:attemptId/violations` | Record browser integrity events |
 | `POST` | `/v1/attempts/:attemptId/submit` | Persist final submission state |
 | `GET` | `/v1/attempts/:attemptId/result` | Read a published result |
 | `GET` | `/v1/quizzes/:quizId/leaderboard` | Read a published leaderboard |
@@ -322,5 +316,5 @@ Google OAuth itself is outside the backend load test. Tests use valid Supabase t
 - PostgreSQL read replicas before measured demand requires them.
 - Redis, BullMQ, or a separate worker before measured demand requires them.
 - Continuous webcam upload or server-side video processing.
-- Automatic permanent disqualification based solely on an ML prediction.
+- Browser-side ML or camera analysis.
 - Supporting free-text, numeric, or multi-select questions in the first release.

@@ -36,8 +36,9 @@ The frontend communicates with Supabase directly only for authentication. Applic
 - Uses Supabase Auth for Google sign-in and token refresh.
 - Stores unsaved answer mutations in IndexedDB.
 - Displays backend-provided attempt timing.
-- Runs browser-side MediaPipe/TensorFlow.js detectors.
-- Sends violation metadata rather than camera streams.
+- Requests video-only camera access and displays a muted live preview.
+- Does not record, store, analyze, or upload camera data.
+- Sends only configured browser integrity events such as tab, fullscreen, and copy/paste events.
 
 ### Express API
 
@@ -155,8 +156,8 @@ Every question, answer, and submission request checks `expires_at`. When an expi
 
 ### Violation enforcement
 
-1. Receive a bounded batch of browser or ML events.
-2. Validate detector fields, timestamps, confidence, and duration.
+1. Receive a bounded batch of browser integrity events.
+2. Validate event type, timestamp, and metadata size.
 3. Deduplicate repeated events within the configured cooldown.
 4. Determine whether the event qualifies under the active policy.
 5. Persist one violation row containing the event and qualification decision.
@@ -164,7 +165,7 @@ Every question, answer, and submission request checks `expires_at`. When an expi
 7. Return warning actions for counts one through four.
 8. At count five, synchronously score and submit the attempt with reason `VIOLATION`, block re-entry, and set review status to `PENDING`.
 
-ML events initially require confidence of at least `0.95` sustained for at least three seconds. New detectors remain in shadow mode until calibrated. An admin makes the final validity or disqualification decision.
+Camera availability is enforced locally before quiz start and does not contribute camera data to the backend violation count. An admin makes the final validity or disqualification decision for browser violations.
 
 ## Quiz and attempt lifecycle
 
@@ -276,8 +277,8 @@ For 3,000 simultaneous saves, API replicas use small pools and the Supabase pool
 - Never return correct answers before authorized result review.
 - Use short-lived signed URLs for private question images.
 - Rate-limit authentication-sensitive and write-heavy endpoints.
-- Do not log JWTs, answer content, image URLs with signatures, or sensitive ML metadata.
-- Keep camera processing in the browser and document consent and retention rules.
+- Do not log JWTs, answer content, image URLs with signatures, or sensitive student metadata.
+- Keep the camera stream local to the browser, disable audio, and stop all media tracks when the quiz ends or the page exits.
 - Log privileged admin actions with request ID and actor ID.
 
 ## Initial non-goals
@@ -287,5 +288,4 @@ For 3,000 simultaneous saves, API replicas use small pools and the Supabase pool
 - Redis, BullMQ, and background workers before measured demand.
 - Live per-answer leaderboard updates.
 - Read replicas before measured demand.
-- Continuous camera upload.
-- Permanent disqualification based only on an ML prediction.
+- Camera recording, upload, or browser-side ML analysis.
