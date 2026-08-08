@@ -129,10 +129,6 @@ Response:
 }
 ```
 
-### `GET /v1/quizzes`
-
-Returns quizzes for which the student has an eligible roster entry. Supports cursor pagination and optional status filtering.
-
 ### `GET /v1/quizzes/:quizId`
 
 Returns title, description, instructions, schedule, duration, availability, and whether an attempt already exists. It never returns questions or answer keys.

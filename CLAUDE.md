@@ -231,7 +231,7 @@ Build the repository in small vertical slices:
 
 ### 5. Student attempt slice
 
-- Assigned quiz list/detail.
+- Assigned quiz-series list, series child-quiz list, and quiz detail.
 - Start/resume one attempt.
 - Stable randomized snapshots.
 - One-question-at-a-time delivery with `Cache-Control: no-store`.
@@ -312,7 +312,7 @@ Concurrency invariants:
 
 Initial query budgets:
 
-- Assigned quiz list: at most 2 normal round trips.
+- Assigned child quizzes within a series: at most 2 normal round trips.
 - One question with options/saved answer: at most 2.
 - One answer save, including lock: at most 3.
 - Submit and score: at most 3 inside the transaction.

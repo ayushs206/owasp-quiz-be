@@ -161,30 +161,6 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
-  /v1/quizzes:
-    get:
-      tags: [Quizzes]
-      operationId: listAssignedQuizzes
-      summary: List quizzes assigned to the authenticated student
-      parameters:
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-        - name: status
-          in: query
-          schema:
-            $ref: '#/components/schemas/QuizStatus'
-      responses:
-        '200':
-          description: Assigned quiz page
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/QuizListResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
   /v1/quizzes/{quizId}:
     get:
       tags: [Quizzes]

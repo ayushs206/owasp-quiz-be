@@ -530,7 +530,7 @@ Do not add a separate `answers(attempt_id)` or `violations(attempt_id, sequence_
 
 ## Query patterns and N+1 prevention
 
-- Assigned quizzes: query eligible enrollments joined to quiz summaries; do not query each quiz separately.
+- Assigned child quizzes: query eligible enrollments joined to quiz summaries and filter by series; do not query each quiz separately.
 - Current question: fetch one `attempt_questions` row joined to its question, ordered options, and saved answer.
 - Scoring: use one set-based query over attempt questions, options, and answers.
 - Leaderboard: use one aggregate/window query after quiz closure.

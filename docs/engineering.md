@@ -104,7 +104,7 @@ Initial query budgets:
 
 | Operation | Maximum normal database round trips |
 | --- | --- |
-| List assigned quizzes | 2 |
+| List assigned child quizzes within a series | 2 |
 | Load one question with options and saved answer | 2 |
 | Save one answer | 3, including the attempt lock |
 | Submit and score an attempt | 3 inside the transaction |

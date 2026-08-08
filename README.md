@@ -244,7 +244,6 @@ All endpoints are versioned under `/v1` and use standardized RFC 7807 problem re
 | `GET` | `/v1/quiz-series/:seriesId/quizzes` | Assigned quizzes inside a series |
 | `GET` | `/v1/me` | Current profile and role |
 | `POST` | `/v1/onboarding` | Complete the first-login student profile |
-| `GET` | `/v1/quizzes` | Assigned quizzes |
 | `GET` | `/v1/quizzes/:quizId` | Quiz instructions and availability |
 | `POST` | `/v1/quizzes/:quizId/attempts` | Start or resume the single attempt |
 | `GET` | `/v1/attempts/:attemptId` | Attempt state and server timing |
