@@ -62,33 +62,48 @@ sequenceDiagram
     participant API as Backend API
     participant DB as PostgreSQL
 
-    Student->>Frontend: Sign in with Google
+    Student->>Frontend: Continue with Google
     Frontend->>Supabase: Start OAuth
     Supabase-->>Frontend: Session and JWT
     Frontend->>API: Request with bearer JWT
     API->>Supabase: Verify JWT using JWKS
-    API->>DB: Resolve profile, role, and enrollment
-    DB-->>API: Authorized application identity
-    API-->>Frontend: Application response
+    API->>DB: Resolve profile and roster entry
+    alt First verified login
+        API-->>Frontend: ONBOARDING_REQUIRED
+        Student->>Frontend: Enter name, roll, branch, and phone
+        Frontend->>API: Submit onboarding form
+        API->>DB: Validate roster and create completed profile
+        API-->>Frontend: Onboarding complete
+    else Returning login
+        API-->>Frontend: Existing completed profile
+    end
 ```
 
-Supabase manages OAuth, sessions, refresh tokens, and JWT issuance. The backend validates token signature, issuer, audience, and expiry using Supabase JWKS. It does not implement a separate password or session system.
+Supabase manages Google OAuth, sessions, refresh tokens, and JWT issuance. The backend validates token signature, issuer, audience, and expiry using Supabase JWKS. It does not implement a separate password or session system.
+
+Students do not type an email during signup. The email is read from the verified Google identity, normalized, checked against the configured TIET domains, and displayed as read-only during onboarding. The profile is linked to the Supabase user ID from the JWT rather than to an email string alone.
+
+On the first verified login, the student completes a one-time form containing name, roll number, branch, and phone number. Roll number and branch are validated against the imported roster before `profile_completed_at` is set. Returning users must select the same Google account; another Google identity does not match the registered profile and receives `ACCOUNT_NOT_REGISTERED`.
 
 Version one uses two application roles:
 
 - `student`: access assigned quizzes and their own attempts, answers, violations, and published results.
 - `admin`: manage quizzes, questions, rosters, results, and violation reviews.
 
-Students must appear in an imported quiz roster. A valid Google login alone does not grant quiz access. Administrative authorization is resolved from application data rather than trusting user-controlled token metadata.
+Students must appear in an imported quiz roster and complete onboarding. A valid Google login alone does not grant quiz access. Administrative authorization is resolved from application data rather than trusting user-controlled token metadata.
 
 ## Quiz Rules
 
 - Questions are single-choice MCQs with optional private images.
+- Students must complete their roster-validated profile before starting a quiz.
 - Each question supports configurable positive and optional negative marks.
 - Unanswered questions receive zero marks.
 - A student receives one resumable attempt per quiz.
 - Question and option order is randomized and snapshotted when the attempt starts.
 - Published quiz content is immutable; later changes require a new draft/version.
+- Admins can enable or disable a published quiz from the admin panel.
+- Disabling blocks new attempts but does not interrupt students who already started.
+- Closing a quiz is final, rejects further answers, and submits remaining active attempts.
 - The backend creates `started_at` and `expires_at` timestamps using server time.
 - Attempt expiry is the earlier of the configured duration and the quiz closing time.
 - Results and correct answers remain hidden until an admin publishes them.
@@ -97,8 +112,8 @@ Students must appear in an imported quiz roster. A valid Google login alone does
 
 | Entity | Purpose |
 | --- | --- |
-| `profiles` | Supabase identity, normalized email, name, role, and account status |
-| `quizzes` | Quiz configuration, schedule, duration, lifecycle, and result publication |
+| `profiles` | Supabase identity, verified email, name, roll number, branch, phone, role, status, and onboarding completion |
+| `quizzes` | Quiz configuration, schedule, duration, admin availability toggle, lifecycle, and result publication |
 | `quiz_enrollments` | Imported roster entries and links to authenticated students |
 | `questions` | Question content, optional media path, marks, and negative marks |
 | `question_options` | Options, correctness, and source ordering |
@@ -115,6 +130,7 @@ Important constraints include:
 - One attempt per `(quiz_id, user_id)`.
 - One answer per `(attempt_id, question_id)`.
 - One enrollment per `(quiz_id, normalized_email)`.
+- One completed profile per Supabase user ID and roll number.
 - Revision-aware answer updates so an older offline request cannot overwrite a newer answer.
 
 PostgreSQL is the source of truth and receives answer writes directly. Redis is limited to caching, rate limits, short-lived locks, and BullMQ jobs; it is not part of the answer durability path.
@@ -202,6 +218,7 @@ All endpoints are versioned under `/v1` and use standardized RFC 7807 problem re
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/me` | Current profile and role |
+| `POST` | `/v1/onboarding` | Complete the first-login student profile |
 | `GET` | `/v1/quizzes` | Assigned quizzes |
 | `GET` | `/v1/quizzes/:quizId` | Quiz instructions and availability |
 | `POST` | `/v1/quizzes/:quizId/attempts` | Start or resume the single attempt |

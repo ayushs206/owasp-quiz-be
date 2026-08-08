@@ -34,8 +34,13 @@ erDiagram
     PROFILES {
         uuid id PK
         string normalized_email UK
+        string full_name
+        string roll_number UK
+        string branch_code
+        string phone_e164
         user_role role
         account_status status
+        datetime profile_completed_at
     }
 
     QUIZZES {
@@ -45,6 +50,7 @@ erDiagram
         datetime starts_at
         datetime ends_at
         quiz_status status
+        boolean is_enabled
         uuid created_by FK
     }
 
@@ -53,6 +59,8 @@ erDiagram
         uuid quiz_id FK
         uuid user_id FK
         string normalized_email
+        string roll_number
+        string branch_code
         enrollment_status status
     }
 
@@ -155,13 +163,17 @@ erDiagram
 | `id` | `uuid` | Primary key; equals the Supabase authenticated user ID. |
 | `email` | `text` | Original authenticated email. |
 | `normalized_email` | `text` | Lowercase and trimmed; unique. |
-| `full_name` | `text` | Nullable. |
+| `full_name` | `text` | Nullable until onboarding; then required. |
+| `roll_number` | `text` | Nullable until onboarding; unique and roster-validated. |
+| `branch_code` | `text` | Nullable until onboarding; roster-validated. |
+| `phone_e164` | `text` | Nullable until onboarding; then required and stored in E.164 format. |
 | `role` | `user_role` | Defaults to `STUDENT`. |
 | `status` | `account_status` | Defaults to `ACTIVE`. |
+| `profile_completed_at` | `timestamptz` | Nullable until the one-time onboarding transaction succeeds. |
 | `created_at` | `timestamptz` | Creation time. |
 | `updated_at` | `timestamptz` | Last update time. |
 
-The Supabase user is the identity source. The application profile stores authorization data and does not duplicate password or session fields.
+The Supabase user ID from the verified JWT is the identity source. Email is copied from the verified Google identity and is not accepted from onboarding input. The application profile stores authorization and onboarding data but does not duplicate passwords, access tokens, refresh tokens, or sessions.
 
 ### `quizzes`
 
@@ -175,12 +187,13 @@ The Supabase user is the identity source. The application profile stores authori
 | `starts_at` | `timestamptz` | Quiz access start. |
 | `ends_at` | `timestamptz` | Must be after `starts_at`. |
 | `status` | `quiz_status` | Defaults to `DRAFT`. |
+| `is_enabled` | `boolean` | Defaults to false; controls whether a published quiz accepts new attempts. |
 | `results_published_at` | `timestamptz` | Nullable. |
 | `created_by` | `uuid` | References `profiles.id`. |
 | `created_at` | `timestamptz` | Creation time. |
 | `updated_at` | `timestamptz` | Last update time. |
 
-Published quiz content is immutable. A changed quiz is created as a new draft or cloned version.
+Published quiz content is immutable. A changed quiz is created as a new draft or cloned version. `is_enabled` is an operational availability switch: disabling blocks new starts but does not change existing attempt expiry. Moving the quiz to `CLOSED` is the final action that ends active participation.
 
 ### `quiz_enrollments`
 
@@ -190,14 +203,19 @@ Published quiz content is immutable. A changed quiz is created as a new draft or
 | `quiz_id` | `uuid` | References `quizzes.id`. |
 | `normalized_email` | `text` | Imported roster identity. |
 | `user_id` | `uuid` | Nullable reference to `profiles.id`; linked after login. |
-| `student_reference` | `text` | Nullable roll number or institutional ID. |
+| `roll_number` | `text` | Required imported institutional roll number. |
+| `branch_code` | `text` | Required imported branch code. |
+| `roster_name` | `text` | Nullable imported student name for admin comparison. |
 | `status` | `enrollment_status` | Defaults to `ELIGIBLE`. |
 | `created_at` | `timestamptz` | Creation time. |
 
 Unique constraints:
 
 - `(quiz_id, normalized_email)`
+- `(quiz_id, roll_number)`
 - `(quiz_id, user_id)` when `user_id` is not null
+
+During onboarding, the submitted roll number and branch must match the eligible roster row for the verified Google email. Conflicting roster information is rejected for admin review rather than silently overwriting an existing profile.
 
 ### `questions`
 
@@ -340,9 +358,11 @@ Audit rows are append-only through application permissions.
 ## Required indexes
 
 - `profiles(normalized_email)` unique.
+- `profiles(roll_number)` unique where not null.
 - `quizzes(status, starts_at, ends_at)`.
 - `quiz_enrollments(normalized_email, status)`.
 - `quiz_enrollments(quiz_id, user_id)`.
+- `quiz_enrollments(quiz_id, roll_number)` unique.
 - `questions(quiz_id, source_order)`.
 - `attempts(user_id, status)`.
 - `attempts(quiz_id, status)`.
@@ -355,6 +375,15 @@ Audit rows are append-only through application permissions.
 Indexes should be confirmed with query plans after realistic load tests; speculative indexes are avoided.
 
 ## Transaction boundaries
+
+### First-login onboarding
+
+- Lock the eligible roster entry for the verified Google email.
+- Confirm the submitted roll number and branch match the roster.
+- Confirm the roll number is not linked to another Supabase user ID.
+- Update the profile fields and `profile_completed_at`.
+- Link every applicable enrollment for the same verified email to the profile.
+- Commit together; duplicate or conflicting identities fail without partial profile creation.
 
 ### Attempt creation
 
@@ -393,6 +422,7 @@ Indexes should be confirmed with query plans after realistic load tests; specula
 ## Concurrency invariants
 
 - Attempt creation relies on the unique `(quiz_id, user_id)` constraint rather than a read-then-insert assumption.
+- Onboarding relies on unique profile email/roll constraints so concurrent or repeated form submissions cannot create two student identities.
 - Answer save, submission, expiry, and qualifying-violation transitions lock the same attempt row.
 - The answer upsert updates only when the incoming revision is higher.
 - The same revision with different content is rejected instead of choosing an arbitrary winner.
@@ -427,6 +457,7 @@ No service may execute a database call inside a loop over an unbounded result se
 Retention periods must be approved before production. Until then:
 
 - Keep attempts, answers, results, and audit logs.
+- Restrict phone-number access to the student and authorized admins; never include it in logs, exports, results, or leaderboards unless explicitly approved.
 - Keep violation metadata only as long as required for review and institutional policy.
 - Do not store camera video.
 - Remove signed media URLs from logs; store only stable private object paths.

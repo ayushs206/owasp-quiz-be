@@ -8,6 +8,7 @@
 - Timestamps: ISO 8601 UTC strings.
 - IDs: UUID strings.
 - Validation: Zod schemas implemented from this contract.
+- Student identity comes from Google OAuth through Supabase; onboarding never accepts an email field from the client.
 - Student endpoints enforce ownership and enrollment.
 - Admin endpoints require the application `ADMIN` role.
 
@@ -52,15 +53,61 @@ Errors use `application/problem+json`:
 
 ### `GET /v1/me`
 
-Returns the authenticated application profile.
+Returns the authenticated application profile or the first-login onboarding requirement. The email comes from the verified Google identity and is read-only.
+
+```json
+{
+  "id": "uuid",
+  "email": "student@example.edu",
+  "fullName": null,
+  "rollNumber": null,
+  "branchCode": null,
+  "phoneNumber": null,
+  "role": "STUDENT",
+  "status": "ACTIVE",
+  "onboardingStatus": "REQUIRED"
+}
+```
+
+If the authenticated Google identity is not an allowed TIET account or has no eligible roster entry, return `403 ACCOUNT_NOT_REGISTERED` and do not allow onboarding.
+
+### `POST /v1/onboarding`
+
+Completes the student profile after the first successful Google login.
+
+```json
+{
+  "fullName": "Student Name",
+  "rollNumber": "102300001",
+  "branchCode": "CSE",
+  "phoneNumber": "+919876543210"
+}
+```
+
+Rules:
+
+- The request must contain a valid Supabase JWT created through Google OAuth.
+- Email is taken only from the verified JWT and must not appear in the body.
+- Roll number and branch must match the eligible roster row for that email.
+- Roll number must not belong to another profile.
+- Phone number must be normalized to E.164 format.
+- Repeating the same completed request is idempotent.
+- Changing email, roll number, or branch after completion requires an admin correction flow.
+
+Response:
 
 ```json
 {
   "id": "uuid",
   "email": "student@example.edu",
   "fullName": "Student Name",
+  "rollNumber": "102300001",
+  "branchCode": "CSE",
+  "phoneNumber": "+919876543210",
   "role": "STUDENT",
-  "status": "ACTIVE"
+  "status": "ACTIVE",
+  "onboardingStatus": "COMPLETED",
+  "profileCompletedAt": "2026-08-08T09:00:00Z"
 }
 ```
 
@@ -75,6 +122,10 @@ Returns title, description, instructions, schedule, duration, availability, and 
 ### `POST /v1/quizzes/:quizId/attempts`
 
 Starts or resumes the single allowed attempt.
+
+The request is rejected with `403 PROFILE_INCOMPLETE` until onboarding is complete.
+
+It also requires the quiz to be published, enabled, and within its server-side schedule. An existing in-progress attempt is resumed even if the quiz was subsequently disabled. A submitted or scored attempt returns `409 QUIZ_ALREADY_ATTEMPTED`.
 
 Response:
 
@@ -244,10 +295,12 @@ Returns a paginated leaderboard only after publication. The public student ident
 - `GET /v1/admin/quizzes/:quizId`
 - `PATCH /v1/admin/quizzes/:quizId`
 - `POST /v1/admin/quizzes/:quizId/publish`
+- `POST /v1/admin/quizzes/:quizId/enable`
+- `POST /v1/admin/quizzes/:quizId/disable`
 - `POST /v1/admin/quizzes/:quizId/close`
 - `POST /v1/admin/quizzes/:quizId/clone`
 
-Only draft quizzes are editable. Publication validates schedule, question count, option count, and exactly one correct option per question.
+Only draft quizzes are editable. Publication validates schedule, question count, option count, and exactly one correct option per question. Enable/disable is idempotent. Disabling blocks new attempts without interrupting active attempts. Closing is final and triggers submission of active attempts.
 
 ### Question management
 
@@ -264,7 +317,7 @@ The image URL endpoint returns a short-lived signed upload URL for a private Sup
 - `GET /v1/admin/quizzes/:quizId/enrollments`
 - `PATCH /v1/admin/enrollments/:enrollmentId`
 
-Roster imports accept CSV, normalize emails, report invalid rows, and do not create duplicate enrollments.
+Roster imports require email, roll number, and branch code; the optional roster name is used for admin comparison. Imports normalize emails, report invalid/conflicting rows, and do not create duplicate enrollments.
 
 ### Attempts and violations
 
@@ -306,7 +359,17 @@ Exact limits are environment configuration, not hard-coded contract values.
 
 | Situation | API behavior |
 | --- | --- |
+| First login with an eligible Google account | Return `onboardingStatus: REQUIRED` until `POST /v1/onboarding` succeeds. |
+| Login uses a different Google account | Return `403 ACCOUNT_NOT_REGISTERED`; do not match by submitted roll number. |
+| Google email is outside configured TIET domains | Return `403 EMAIL_DOMAIN_NOT_ALLOWED`. |
+| Onboarding roll or branch does not match roster | Return `409 ROSTER_DETAILS_MISMATCH`. |
+| Roll number is already linked to another identity | Return `409 ROLL_NUMBER_ALREADY_REGISTERED`. |
+| Onboarding is submitted twice | Return the existing completed profile when the data matches. |
+| Student attempts to edit email, roll, or branch | Reject and require an admin correction. |
+| Published quiz is disabled | Reject new attempts with `403 QUIZ_DISABLED`; allow an existing attempt to resume. |
+| Quiz is manually closed | Reject new starts and answers; submit remaining active attempts. |
 | Concurrent attempt starts | Return the single existing or newly created attempt. |
+| Submitted student tries to start again | Return `409 QUIZ_ALREADY_ATTEMPTED`. |
 | Answer races with submission | The operation that obtains the attempt lock first completes; the other observes the resulting state. |
 | Duplicate answer retry | Return the current saved answer without creating another row. |
 | Same revision, different option | Return `409 REVISION_CONFLICT`. |

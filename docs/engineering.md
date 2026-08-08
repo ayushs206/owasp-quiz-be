@@ -124,6 +124,8 @@ The budgets are guardrails, not a reason to combine unrelated logic into unreada
 ## Security rules
 
 - Verify Supabase JWT signature, issuer, audience, and expiry.
+- Accept student authentication only from the configured Google provider and TIET email domains.
+- Use the JWT subject as the profile identifier; never authenticate or link a profile from a client-submitted email.
 - Resolve roles and quiz access from application data.
 - Enforce ownership in services even when routes are role-protected.
 - Use parameterized Prisma or TypedSQL queries only.
@@ -153,6 +155,8 @@ Avoid logging full request bodies. Violation metadata and student data require e
 
 Cover pure and service-level behavior:
 
+- Google email-domain validation and onboarding state.
+- Roster matching, roll uniqueness, and phone normalization.
 - Attempt timing and state transitions.
 - Scoring, including negative marking and unanswered questions.
 - Answer revision comparison.
@@ -163,6 +167,10 @@ Cover pure and service-level behavior:
 
 Run against disposable PostgreSQL and Redis instances:
 
+- First Google login creates or resolves one incomplete profile.
+- Onboarding links the verified identity and roster in one transaction.
+- A second Google identity cannot claim an existing roll number.
+- Repeated onboarding submissions remain idempotent.
 - Concurrent attempt creation produces one attempt.
 - Answer upserts reject stale revisions.
 - Submission is idempotent.
@@ -182,8 +190,14 @@ Use Supertest for authentication, validation, status codes, problem responses, a
 
 Edge-case tests must include:
 
+- Non-TIET Google accounts and registered students choosing the wrong Google account.
+- Missing, revoked, duplicated, or conflicting roster records.
+- Invalid branch, roll number, name, and E.164 phone values.
+- Attempt creation before onboarding completion.
 - Blocked users and revoked enrollments.
 - Start and end schedule boundaries.
+- Admin enable/disable behavior and manual early closure.
+- A submitted student cannot create or resume a second attempt.
 - Multiple browser tabs and duplicate requests.
 - Offline batches containing valid, duplicate, stale, and invalid entries.
 - Options that do not belong to the requested question.

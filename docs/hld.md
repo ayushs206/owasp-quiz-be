@@ -83,18 +83,24 @@ Worker responsibilities:
 
 ### Authentication and enrollment
 
-1. The frontend starts Google OAuth through Supabase.
-2. Supabase returns a session containing a JWT.
+1. The student selects **Continue with Google**.
+2. Supabase completes Google OAuth and returns a session containing a JWT.
 3. The frontend sends the JWT as a bearer token.
-4. The API verifies signature, issuer, audience, and expiry.
-5. On first access, the API creates or updates the profile using the authenticated identity.
-6. Quiz access is granted only when the normalized email matches an eligible roster entry.
+4. The API verifies signature, issuer, audience, expiry, and the configured TIET email domain.
+5. The API uses the JWT subject as the permanent application profile ID.
+6. The normalized verified email must match an eligible imported roster entry.
+7. On first login, `GET /v1/me` returns `ONBOARDING_REQUIRED` and the verified email as read-only display data.
+8. The student submits name, roll number, branch, and phone through `POST /v1/onboarding`.
+9. The API validates roll number and branch against the roster, checks uniqueness, links the enrollment, and sets `profile_completed_at` in one transaction.
+10. On later logins, the same Google identity resolves directly to the completed profile.
 
-A successful Google login does not by itself grant access to a quiz.
+A successful Google login does not by itself grant access to a quiz. A different Google identity receives `ACCOUNT_NOT_REGISTERED` even if the user claims the same roll number. Email, roll number, and branch cannot be changed by the student after onboarding; an admin must review corrections.
+
+Supabase remains responsible for access-token renewal and refresh-token rotation. The backend receives only bearer access tokens, does not store refresh tokens, and remains stateless.
 
 ### Start or resume attempt
 
-1. Validate authentication, enrollment, quiz status, and schedule.
+1. Validate authentication, completed profile, enrollment, quiz status, admin availability toggle, and schedule.
 2. Return the existing in-progress attempt when one exists.
 3. Otherwise create one attempt in a transaction.
 4. Set `expires_at` to the earlier of `started_at + duration` and the quiz closing time.
@@ -191,6 +197,9 @@ flowchart LR
 ```
 
 - Published quiz content is immutable.
+- A published quiz accepts new attempts only when `is_enabled = true` and server time is within its schedule.
+- Disabling a quiz blocks new attempts but lets existing attempts continue to their existing expiry.
+- Closing a quiz is final: it sets the effective closing time, rejects later answers, and causes active attempts to be submitted.
 - Schedule timestamps determine whether a published quiz may be started.
 - Closing a quiz prevents new attempts but does not erase existing data.
 - Publishing results controls student visibility, not whether scoring has run.
@@ -225,6 +234,8 @@ Target workload:
 | API instance stops | Another stateless replica handles subsequent requests. |
 | Storage unavailable | Text remains available; image-based questions show a retryable media error. |
 | Duplicate requests | Unique constraints, revisions, and idempotent state transitions prevent duplicate effects. |
+| Quiz is disabled | New attempts are rejected; active attempts continue and answer saving remains available. |
+| Quiz is closed early | Active attempts are submitted through the normal expiry/submission path and later answers are rejected. |
 
 ## Concurrency and race-condition handling
 
@@ -266,6 +277,7 @@ For 3,000 simultaneous saves, API replicas use small pools and the Supabase pool
 | User opens multiple tabs | Revisions determine the winner; conflicts cause the stale tab to reload server state. |
 | User changes device and revision restarts | Fetch server answers first and continue above the server revision. |
 | Quiz closes during an attempt | `expires_at` already uses the earlier closing time; later writes are rejected. |
+| Admin disables a published quiz | Block new starts only; do not change existing attempt timers. |
 | Published quiz edit is attempted | Reject the change; clone to a new draft instead. |
 | Selected option belongs to another question | Reject without changing the saved answer. |
 | Duplicate roster rows differ only by case/space | Normalize email and report the duplicate during import. |
