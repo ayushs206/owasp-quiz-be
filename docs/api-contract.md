@@ -136,6 +136,7 @@ Response:
   "status": "IN_PROGRESS",
   "startedAt": "2026-08-08T10:00:00Z",
   "expiresAt": "2026-08-08T10:30:00Z",
+  "questionCount": 30,
   "serverTime": "2026-08-08T10:00:00Z",
   "resumed": false
 }
@@ -156,13 +157,13 @@ Returns one question from the immutable attempt-specific order. The backend vali
   "attemptId": "uuid",
   "questionCount": 30,
   "question": {
-    "id": "uuid",
+    "questionId": "uuid",
     "displayOrder": 1,
     "prompt": "Question text",
     "imageUrl": null,
     "options": [
-      { "id": "uuid", "text": "Option A" },
-      { "id": "uuid", "text": "Option B" }
+      { "optionId": "uuid", "text": "Option A" },
+      { "optionId": "uuid", "text": "Option B" }
     ],
     "savedAnswer": {
       "selectedOptionId": "uuid",

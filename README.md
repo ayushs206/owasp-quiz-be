@@ -9,6 +9,7 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 - [High-level design](docs/hld.md)
 - [Database design](docs/database-design.md)
 - [API contract](docs/api-contract.md)
+- [Machine-readable OpenAPI contract](docs/openapi.yaml)
 - [Engineering standards and CI/CD](docs/engineering.md)
 
 ## Goals

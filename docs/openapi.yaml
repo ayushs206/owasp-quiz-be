@@ -1,0 +1,1700 @@
+openapi: 3.1.0
+info:
+  title: OWASP TIET Quiz Portal API
+  version: 1.0.0
+  description: |
+    Machine-readable contract for the OWASP TIET Quiz Portal backend.
+    Supabase Google OAuth provides bearer JWTs. Application authorization,
+    quiz timing, attempts, answers, scoring, and violations are enforced here.
+  license:
+    name: Unlicensed
+    identifier: LicenseRef-Unlicensed
+servers:
+  - url: /
+    description: Same origin as the deployed API
+security:
+  - bearerAuth: []
+tags:
+  - name: Profile
+    description: Authenticated profile and first-login onboarding
+  - name: Quizzes
+    description: Student quiz discovery and details
+  - name: Attempts
+    description: Attempt lifecycle, timing, questions, and submission
+  - name: Answers
+    description: Revision-safe answer persistence
+  - name: Violations
+    description: Browser integrity events and enforcement state
+  - name: Results
+    description: Published scores and leaderboard access
+  - name: Admin Quizzes
+    description: Quiz configuration and lifecycle controls
+  - name: Admin Questions
+    description: Draft question and private image management
+  - name: Admin Enrollments
+    description: Roster import and enrollment administration
+  - name: Admin Attempts
+    description: Attempt inspection and violation review
+  - name: Admin Results
+    description: Result publication and leaderboard administration
+
+paths:
+  /v1/me:
+    get:
+      tags: [Profile]
+      operationId: getCurrentProfile
+      summary: Get the authenticated application profile
+      responses:
+        '200':
+          description: Current profile or onboarding-required profile shell
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/onboarding:
+    post:
+      tags: [Profile]
+      operationId: completeOnboarding
+      summary: Complete first-login student onboarding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardingRequest'
+      responses:
+        '200':
+          description: Existing matching completed profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '201':
+          description: Onboarding completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/quizzes:
+    get:
+      tags: [Quizzes]
+      operationId: listAssignedQuizzes
+      summary: List quizzes assigned to the authenticated student
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/QuizStatus'
+      responses:
+        '200':
+          description: Assigned quiz page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/quizzes/{quizId}:
+    get:
+      tags: [Quizzes]
+      operationId: getAssignedQuiz
+      summary: Get assigned quiz instructions and availability
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '200':
+          description: Quiz detail without questions or answer keys
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/quizzes/{quizId}/attempts:
+    post:
+      tags: [Attempts]
+      operationId: startOrResumeAttempt
+      summary: Start or resume the student's single quiz attempt
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '200':
+          description: Existing in-progress attempt resumed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptStartResponse'
+        '201':
+          description: Attempt created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptStartResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/attempts/{attemptId}:
+    get:
+      tags: [Attempts]
+      operationId: getAttempt
+      summary: Get attempt state and authoritative timing
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+      responses:
+        '200':
+          description: Attempt state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Attempt'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/attempts/{attemptId}/questions/{displayOrder}:
+    get:
+      tags: [Attempts]
+      operationId: getAttemptQuestion
+      summary: Get one question from the student's immutable randomized order
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+        - $ref: '#/components/parameters/DisplayOrder'
+      responses:
+        '200':
+          description: Current question; correctness and marks are omitted
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Always `no-store`
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptQuestionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/attempts/{attemptId}/answers/{questionId}:
+    put:
+      tags: [Answers]
+      operationId: saveAnswer
+      summary: Save the latest changed answer before navigation or submission
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+        - $ref: '#/components/parameters/QuestionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveAnswerRequest'
+      responses:
+        '200':
+          description: Answer committed or matching retry resolved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveAnswerResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/attempts/{attemptId}/violations:
+    post:
+      tags: [Violations]
+      operationId: recordViolations
+      summary: Record browser integrity events
+      description: Camera frames, audio, recordings, face data, and ML output are not accepted.
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ViolationBatchRequest'
+      responses:
+        '200':
+          description: Current violation enforcement state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViolationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+
+  /v1/attempts/{attemptId}/submit:
+    post:
+      tags: [Attempts]
+      operationId: submitAttempt
+      summary: Submit and synchronously score the attempt
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+      responses:
+        '200':
+          description: Submitted state; score remains hidden until publication
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmissionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/attempts/{attemptId}/result:
+    get:
+      tags: [Results]
+      operationId: getAttemptResult
+      summary: Get a published result for the authenticated student
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+      responses:
+        '200':
+          description: Published result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/quizzes/{quizId}/leaderboard:
+    get:
+      tags: [Results]
+      operationId: getPublishedLeaderboard
+      summary: Get the published student leaderboard
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Published leaderboard page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaderboardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/quizzes:
+    get:
+      tags: [Admin Quizzes]
+      operationId: adminListQuizzes
+      summary: List quizzes for administration
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Admin quiz page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Admin Quizzes]
+      operationId: adminCreateQuiz
+      summary: Create a draft quiz
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuizWriteRequest'
+      responses:
+        '201':
+          description: Draft quiz created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/admin/quizzes/{quizId}:
+    get:
+      tags: [Admin Quizzes]
+      operationId: adminGetQuiz
+      summary: Get a quiz for administration
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '200':
+          description: Admin quiz detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Admin Quizzes]
+      operationId: adminUpdateQuiz
+      summary: Update a draft quiz
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuizWriteRequest'
+      responses:
+        '200':
+          description: Draft quiz updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/quizzes/{quizId}/publish:
+    post:
+      tags: [Admin Quizzes]
+      operationId: adminPublishQuiz
+      summary: Validate and publish a draft quiz
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '200':
+          $ref: '#/components/responses/QuizStateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/quizzes/{quizId}/enable:
+    post:
+      tags: [Admin Quizzes]
+      operationId: adminEnableQuiz
+      summary: Enable new attempt starts for a published quiz
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '200':
+          $ref: '#/components/responses/QuizStateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/quizzes/{quizId}/disable:
+    post:
+      tags: [Admin Quizzes]
+      operationId: adminDisableQuiz
+      summary: Disable new attempt starts without interrupting active attempts
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '200':
+          $ref: '#/components/responses/QuizStateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/admin/quizzes/{quizId}/close:
+    post:
+      tags: [Admin Quizzes]
+      operationId: adminCloseQuiz
+      summary: Close a quiz and finalize remaining active attempts
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '200':
+          $ref: '#/components/responses/QuizStateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/quizzes/{quizId}/clone:
+    post:
+      tags: [Admin Quizzes]
+      operationId: adminCloneQuiz
+      summary: Clone a quiz into a new editable draft
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '201':
+          description: Draft clone created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QuizDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/quizzes/{quizId}/questions:
+    post:
+      tags: [Admin Questions]
+      operationId: adminCreateQuestion
+      summary: Add a question to a draft quiz
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuestionWriteRequest'
+      responses:
+        '201':
+          description: Question created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminQuestion'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/questions/{questionId}:
+    patch:
+      tags: [Admin Questions]
+      operationId: adminUpdateQuestion
+      summary: Update a question in a draft quiz
+      parameters:
+        - $ref: '#/components/parameters/QuestionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuestionWriteRequest'
+      responses:
+        '200':
+          description: Question updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminQuestion'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [Admin Questions]
+      operationId: adminDeleteQuestion
+      summary: Delete a question from a draft quiz
+      parameters:
+        - $ref: '#/components/parameters/QuestionId'
+      responses:
+        '204':
+          description: Question deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/questions/{questionId}/image-url:
+    post:
+      tags: [Admin Questions]
+      operationId: adminCreateQuestionImageUploadUrl
+      summary: Create a short-lived signed upload URL for a question image
+      parameters:
+        - $ref: '#/components/parameters/QuestionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [contentType, fileName]
+              properties:
+                contentType:
+                  type: string
+                  enum: [image/png, image/jpeg, image/webp]
+                fileName:
+                  type: string
+                  minLength: 1
+                  maxLength: 255
+      responses:
+        '200':
+          description: Signed upload details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignedUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/quizzes/{quizId}/enrollments/import:
+    post:
+      tags: [Admin Enrollments]
+      operationId: adminImportEnrollments
+      summary: Import roster entries from CSV
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Import summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentImportResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+
+  /v1/admin/quizzes/{quizId}/enrollments:
+    get:
+      tags: [Admin Enrollments]
+      operationId: adminListEnrollments
+      summary: List quiz roster entries
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Enrollment page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/admin/enrollments/{enrollmentId}:
+    patch:
+      tags: [Admin Enrollments]
+      operationId: adminUpdateEnrollment
+      summary: Update enrollment eligibility or roster details
+      parameters:
+        - $ref: '#/components/parameters/EnrollmentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollmentUpdateRequest'
+      responses:
+        '200':
+          description: Enrollment updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Enrollment'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/quizzes/{quizId}/attempts:
+    get:
+      tags: [Admin Attempts]
+      operationId: adminListAttempts
+      summary: List attempts for a quiz
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/AttemptStatus'
+      responses:
+        '200':
+          description: Attempt page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttemptListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/admin/attempts/{attemptId}:
+    get:
+      tags: [Admin Attempts]
+      operationId: adminGetAttempt
+      summary: Get an attempt for administration
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+      responses:
+        '200':
+          description: Attempt detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAttempt'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/attempts/{attemptId}/violations:
+    get:
+      tags: [Admin Attempts]
+      operationId: adminListAttemptViolations
+      summary: List browser violations for an attempt
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Violation page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViolationListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/admin/attempts/{attemptId}/review:
+    post:
+      tags: [Admin Attempts]
+      operationId: adminReviewAttempt
+      summary: Approve or disqualify a flagged attempt
+      parameters:
+        - $ref: '#/components/parameters/AttemptId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AttemptReviewRequest'
+      responses:
+        '200':
+          description: Updated attempt review state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminAttempt'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/quizzes/{quizId}/results/publish:
+    post:
+      tags: [Admin Results]
+      operationId: adminPublishResults
+      summary: Publish quiz results and leaderboard
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+      responses:
+        '200':
+          $ref: '#/components/responses/QuizStateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/admin/quizzes/{quizId}/leaderboard:
+    get:
+      tags: [Admin Results]
+      operationId: adminGetLeaderboard
+      summary: Get leaderboard before or after publication
+      parameters:
+        - $ref: '#/components/parameters/QuizId'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Leaderboard page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeaderboardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    QuizId:
+      name: quizId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AttemptId:
+      name: attemptId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    QuestionId:
+      name: questionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    EnrollmentId:
+      name: enrollmentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DisplayOrder:
+      name: displayOrder
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthorized:
+      description: Missing or invalid Supabase JWT
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: Authenticated but not permitted
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Resource not found in the caller's scope
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: Resource or lifecycle conflict
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    PayloadTooLarge:
+      description: Request body exceeds the configured limit
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ServiceUnavailable:
+      description: Temporary database or dependency failure
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    QuizStateResponse:
+      description: Updated quiz state
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/QuizDetail'
+
+  schemas:
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [type, title, status, code, requestId]
+      properties:
+        type:
+          type: string
+          format: uri-reference
+        title:
+          type: string
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        code:
+          type: string
+        detail:
+          type: string
+        requestId:
+          type: string
+          format: uuid
+        currentRevision:
+          type: integer
+          format: int64
+          minimum: 1
+
+    UserRole:
+      type: string
+      enum: [STUDENT, ADMIN]
+    AccountStatus:
+      type: string
+      enum: [ACTIVE, BLOCKED]
+    OnboardingStatus:
+      type: string
+      enum: [REQUIRED, COMPLETED]
+    QuizStatus:
+      type: string
+      enum: [DRAFT, PUBLISHED, CLOSED, RESULTS_PUBLISHED]
+    EnrollmentStatus:
+      type: string
+      enum: [ELIGIBLE, REVOKED]
+    AttemptStatus:
+      type: string
+      enum: [IN_PROGRESS, SUBMITTED]
+    SubmissionReason:
+      type: string
+      enum: [USER, EXPIRED, VIOLATION, ADMIN]
+    ReviewStatus:
+      type: string
+      enum: [NOT_REQUIRED, PENDING, APPROVED, DISQUALIFIED]
+
+    Profile:
+      type: object
+      additionalProperties: false
+      required: [id, email, role, status, onboardingStatus]
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+          readOnly: true
+        fullName:
+          type: [string, 'null']
+        rollNumber:
+          type: [string, 'null']
+        branchCode:
+          type: [string, 'null']
+        phoneNumber:
+          type: [string, 'null']
+          pattern: '^\+[1-9][0-9]{7,14}$'
+        role:
+          $ref: '#/components/schemas/UserRole'
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        onboardingStatus:
+          $ref: '#/components/schemas/OnboardingStatus'
+        profileCompletedAt:
+          type: [string, 'null']
+          format: date-time
+
+    OnboardingRequest:
+      type: object
+      additionalProperties: false
+      required: [fullName, rollNumber, branchCode, phoneNumber]
+      properties:
+        fullName:
+          type: string
+          minLength: 1
+          maxLength: 120
+        rollNumber:
+          type: string
+          minLength: 1
+          maxLength: 40
+        branchCode:
+          type: string
+          minLength: 1
+          maxLength: 40
+        phoneNumber:
+          type: string
+          pattern: '^\+[1-9][0-9]{7,14}$'
+
+    QuizSummary:
+      type: object
+      additionalProperties: false
+      required: [quizId, title, durationMinutes, startsAt, endsAt, status, isEnabled, availability]
+      properties:
+        quizId:
+          type: string
+          format: uuid
+        title:
+          type: string
+        durationMinutes:
+          type: integer
+          minimum: 1
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/QuizStatus'
+        isEnabled:
+          type: boolean
+        availability:
+          type: string
+          enum: [UPCOMING, AVAILABLE, DISABLED, CLOSED, COMPLETED]
+        attemptStatus:
+          oneOf:
+            - $ref: '#/components/schemas/AttemptStatus'
+            - type: 'null'
+
+    QuizDetail:
+      allOf:
+        - $ref: '#/components/schemas/QuizSummary'
+        - type: object
+          additionalProperties: false
+          required: [description, instructions, resultsPublishedAt]
+          properties:
+            description:
+              type: [string, 'null']
+            instructions:
+              type: [string, 'null']
+            resultsPublishedAt:
+              type: [string, 'null']
+              format: date-time
+
+    QuizListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuizSummary'
+        nextCursor:
+          type: [string, 'null']
+
+    QuizWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [title, durationMinutes, startsAt, endsAt]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: [string, 'null']
+          maxLength: 2000
+        instructions:
+          type: [string, 'null']
+          maxLength: 10000
+        durationMinutes:
+          type: integer
+          minimum: 1
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+
+    Attempt:
+      type: object
+      additionalProperties: false
+      required:
+        - attemptId
+        - quizId
+        - status
+        - startedAt
+        - expiresAt
+        - serverTime
+        - qualifyingViolationCount
+        - reviewStatus
+      properties:
+        attemptId:
+          type: string
+          format: uuid
+        quizId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/AttemptStatus'
+        startedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        submittedAt:
+          type: [string, 'null']
+          format: date-time
+        submissionReason:
+          oneOf:
+            - $ref: '#/components/schemas/SubmissionReason'
+            - type: 'null'
+        serverTime:
+          type: string
+          format: date-time
+        qualifyingViolationCount:
+          type: integer
+          minimum: 0
+        reviewStatus:
+          $ref: '#/components/schemas/ReviewStatus'
+
+    AttemptStartResponse:
+      allOf:
+        - $ref: '#/components/schemas/Attempt'
+        - type: object
+          additionalProperties: false
+          required: [questionCount, resumed]
+          properties:
+            questionCount:
+              type: integer
+              minimum: 1
+            resumed:
+              type: boolean
+
+    QuestionOption:
+      type: object
+      additionalProperties: false
+      required: [optionId, text]
+      properties:
+        optionId:
+          type: string
+          format: uuid
+        text:
+          type: string
+
+    SavedAnswer:
+      type: object
+      additionalProperties: false
+      required: [selectedOptionId, clientRevision]
+      properties:
+        selectedOptionId:
+          type: string
+          format: uuid
+        clientRevision:
+          type: integer
+          format: int64
+          minimum: 1
+
+    StudentQuestion:
+      type: object
+      additionalProperties: false
+      required: [questionId, displayOrder, prompt, imageUrl, options, savedAnswer]
+      properties:
+        questionId:
+          type: string
+          format: uuid
+        displayOrder:
+          type: integer
+          minimum: 1
+        prompt:
+          type: string
+        imageUrl:
+          type: [string, 'null']
+          format: uri
+        options:
+          type: array
+          minItems: 2
+          items:
+            $ref: '#/components/schemas/QuestionOption'
+        savedAnswer:
+          oneOf:
+            - $ref: '#/components/schemas/SavedAnswer'
+            - type: 'null'
+
+    AttemptQuestionResponse:
+      type: object
+      additionalProperties: false
+      required: [attemptId, questionCount, question, hasPrevious, hasNext]
+      properties:
+        attemptId:
+          type: string
+          format: uuid
+        questionCount:
+          type: integer
+          minimum: 1
+        question:
+          $ref: '#/components/schemas/StudentQuestion'
+        hasPrevious:
+          type: boolean
+        hasNext:
+          type: boolean
+
+    SaveAnswerRequest:
+      type: object
+      additionalProperties: false
+      required: [selectedOptionId, clientRevision, idempotencyKey]
+      properties:
+        selectedOptionId:
+          type: string
+          format: uuid
+        clientRevision:
+          type: integer
+          format: int64
+          minimum: 1
+        idempotencyKey:
+          type: string
+          format: uuid
+
+    SaveAnswerResponse:
+      type: object
+      additionalProperties: false
+      required: [attemptId, questionId, selectedOptionId, clientRevision, savedAt, status]
+      properties:
+        attemptId:
+          type: string
+          format: uuid
+        questionId:
+          type: string
+          format: uuid
+        selectedOptionId:
+          type: string
+          format: uuid
+        clientRevision:
+          type: integer
+          format: int64
+        savedAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [SAVED]
+
+    ViolationEventRequest:
+      type: object
+      additionalProperties: false
+      required: [eventId, type, occurredAt, metadata]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [TAB_HIDDEN, FULLSCREEN_EXIT, COPY_ATTEMPT, PASTE_ATTEMPT]
+        occurredAt:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          maxProperties: 20
+          additionalProperties: true
+
+    ViolationBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/ViolationEventRequest'
+
+    ViolationAction:
+      type: string
+      enum: [NONE, WARNING, FINAL_WARNING, FORCE_SUBMITTED]
+
+    ViolationResponse:
+      type: object
+      additionalProperties: false
+      required: [qualifyingViolationCount, action, attemptStatus]
+      properties:
+        qualifyingViolationCount:
+          type: integer
+          minimum: 0
+        action:
+          $ref: '#/components/schemas/ViolationAction'
+        attemptStatus:
+          $ref: '#/components/schemas/AttemptStatus'
+
+    SubmissionResponse:
+      type: object
+      additionalProperties: false
+      required: [attemptId, status, submissionReason, submittedAt]
+      properties:
+        attemptId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          const: SUBMITTED
+        submissionReason:
+          $ref: '#/components/schemas/SubmissionReason'
+        submittedAt:
+          type: string
+          format: date-time
+
+    AttemptResult:
+      type: object
+      additionalProperties: false
+      required:
+        - attemptId
+        - quizId
+        - score
+        - maximumScore
+        - correctCount
+        - incorrectCount
+        - unansweredCount
+        - reviewStatus
+      properties:
+        attemptId:
+          type: string
+          format: uuid
+        quizId:
+          type: string
+          format: uuid
+        score:
+          type: number
+        maximumScore:
+          type: number
+        correctCount:
+          type: integer
+          minimum: 0
+        incorrectCount:
+          type: integer
+          minimum: 0
+        unansweredCount:
+          type: integer
+          minimum: 0
+        reviewStatus:
+          $ref: '#/components/schemas/ReviewStatus'
+
+    LeaderboardEntry:
+      type: object
+      additionalProperties: false
+      required: [rank, studentIdentifier, score]
+      properties:
+        rank:
+          type: integer
+          minimum: 1
+        studentIdentifier:
+          type: string
+        score:
+          type: number
+
+    LeaderboardResponse:
+      type: object
+      additionalProperties: false
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/LeaderboardEntry'
+        nextCursor:
+          type: [string, 'null']
+
+    QuestionOptionWrite:
+      type: object
+      additionalProperties: false
+      required: [text, isCorrect, sourceOrder]
+      properties:
+        optionId:
+          type: string
+          format: uuid
+        text:
+          type: string
+          minLength: 1
+        isCorrect:
+          type: boolean
+        sourceOrder:
+          type: integer
+          minimum: 1
+
+    QuestionWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [prompt, positiveMarks, negativeMarks, sourceOrder, options]
+      properties:
+        prompt:
+          type: string
+          minLength: 1
+        imagePath:
+          type: [string, 'null']
+        positiveMarks:
+          type: number
+          minimum: 0
+        negativeMarks:
+          type: number
+          minimum: 0
+        sourceOrder:
+          type: integer
+          minimum: 1
+        options:
+          type: array
+          minItems: 2
+          items:
+            $ref: '#/components/schemas/QuestionOptionWrite'
+
+    AdminQuestion:
+      type: object
+      additionalProperties: false
+      required: [questionId, quizId, prompt, positiveMarks, negativeMarks, sourceOrder, options]
+      properties:
+        questionId:
+          type: string
+          format: uuid
+        quizId:
+          type: string
+          format: uuid
+        prompt:
+          type: string
+        imagePath:
+          type: [string, 'null']
+        positiveMarks:
+          type: number
+        negativeMarks:
+          type: number
+        sourceOrder:
+          type: integer
+        options:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuestionOptionWrite'
+
+    SignedUploadResponse:
+      type: object
+      additionalProperties: false
+      required: [objectPath, signedUrl, expiresAt]
+      properties:
+        objectPath:
+          type: string
+        signedUrl:
+          type: string
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+
+    Enrollment:
+      type: object
+      additionalProperties: false
+      required: [enrollmentId, quizId, email, rollNumber, branchCode, status]
+      properties:
+        enrollmentId:
+          type: string
+          format: uuid
+        quizId:
+          type: string
+          format: uuid
+        userId:
+          type: [string, 'null']
+          format: uuid
+        email:
+          type: string
+          format: email
+        rollNumber:
+          type: string
+        branchCode:
+          type: string
+        rosterName:
+          type: [string, 'null']
+        status:
+          $ref: '#/components/schemas/EnrollmentStatus'
+
+    EnrollmentListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Enrollment'
+        nextCursor:
+          type: [string, 'null']
+
+    EnrollmentUpdateRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        rollNumber:
+          type: string
+        branchCode:
+          type: string
+        rosterName:
+          type: [string, 'null']
+        status:
+          $ref: '#/components/schemas/EnrollmentStatus'
+      minProperties: 1
+
+    ImportError:
+      type: object
+      additionalProperties: false
+      required: [row, code, message]
+      properties:
+        row:
+          type: integer
+          minimum: 1
+        code:
+          type: string
+        message:
+          type: string
+
+    EnrollmentImportResponse:
+      type: object
+      additionalProperties: false
+      required: [created, updated, rejected, errors]
+      properties:
+        created:
+          type: integer
+          minimum: 0
+        updated:
+          type: integer
+          minimum: 0
+        rejected:
+          type: integer
+          minimum: 0
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImportError'
+
+    Violation:
+      type: object
+      additionalProperties: false
+      required: [violationId, attemptId, type, occurredAt, receivedAt, qualifies]
+      properties:
+        violationId:
+          type: string
+          format: uuid
+        attemptId:
+          type: string
+          format: uuid
+        type:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+        receivedAt:
+          type: string
+          format: date-time
+        metadata:
+          type: object
+          additionalProperties: true
+        qualifies:
+          type: boolean
+        sequenceNumber:
+          type: [integer, 'null']
+
+    ViolationListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Violation'
+        nextCursor:
+          type: [string, 'null']
+
+    AdminAttempt:
+      allOf:
+        - $ref: '#/components/schemas/Attempt'
+        - type: object
+          additionalProperties: false
+          required: [userId, score, maximumScore, correctCount, incorrectCount, unansweredCount]
+          properties:
+            userId:
+              type: string
+              format: uuid
+            score:
+              type: [number, 'null']
+            maximumScore:
+              type: [number, 'null']
+            correctCount:
+              type: [integer, 'null']
+            incorrectCount:
+              type: [integer, 'null']
+            unansweredCount:
+              type: [integer, 'null']
+
+    AttemptListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminAttempt'
+        nextCursor:
+          type: [string, 'null']
+
+    AttemptReviewRequest:
+      type: object
+      additionalProperties: false
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [APPROVED, DISQUALIFIED]
+        note:
+          type: string
+          maxLength: 2000
