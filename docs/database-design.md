@@ -9,6 +9,47 @@
 - IDs use UUIDs and timestamps use timezone-aware PostgreSQL timestamps.
 - Destructive cascades are avoided for exam records.
 
+## Normalization and deliberate snapshots
+
+The transactional model is normalized through fifth normal form where decomposition is useful:
+
+- Every table has a declared primary key, and every non-key attribute depends on the whole candidate key.
+- Repeating options, enrollments, answers, attempt questions, and violations are stored in separate relations rather than repeated columns.
+- Many-to-many relationships are represented by `quiz_enrollments` and `attempt_questions`; there are no unresolved independent multivalued dependencies or join dependencies.
+- Email normalization is represented once per identity context: `profiles` stores the verified application identity, while `quiz_enrollments` stores the imported roster identity that exists before a profile is linked.
+
+Three values are intentionally snapshotted or derived rather than dynamically joined from mutable source rows:
+
+- `quiz_enrollments` keeps imported email, roll number, branch, and roster name so eligibility remains auditable before and after account linking.
+- `attempt_questions` keeps option order and marks as an immutable attempt-time snapshot, so later source changes cannot alter an active or submitted exam.
+- `attempts` keeps final score and answer counts, written atomically at submission, so the published result is immutable and does not require repeated scoring queries.
+
+These are controlled historical snapshots, not duplicate writable sources of truth. Source quiz content is immutable after publication, snapshot rows are never resynchronized, and submitted score fields are changed only by the documented submission/review workflow. The bounded `option_order` JSON array is the sole intentional non-scalar snapshot; it contains only option UUIDs, is validated for shape and uniqueness, and avoids an additional hot-path join table.
+
+## Five mandatory SQL review gates
+
+Every Prisma migration and custom SQL migration must pass all five gates before merge:
+
+1. **Identity:** every table has the documented primary key, composite key, and candidate-key uniqueness constraints.
+2. **References:** every relationship has a foreign key with an explicit delete policy; cross-question option selection is protected by a composite foreign key.
+3. **Domain and state:** database `CHECK` constraints enforce ranges, timestamp ordering, normalized values, and nullability required by lifecycle state where PostgreSQL can express the rule locally.
+4. **Normalization and redundancy:** new columns must depend on a key; snapshots or derived columns require a documented immutability or performance reason and one authoritative write path.
+5. **Performance and concurrency:** unique constraints and foreign keys have supporting indexes, duplicate indexes are not created, hot queries stay within their query budgets, and race-sensitive writes use the documented constraints and row locks.
+
+### Key matrix
+
+| Table | Primary key | Composite/candidate keys |
+| --- | --- | --- |
+| `profiles` | `id` | Unique `normalized_email`; partial unique `roll_number` when present |
+| `quizzes` | `id` | None beyond the primary key |
+| `quiz_enrollments` | `id` | Unique `(quiz_id, normalized_email)`, `(quiz_id, roll_number)`, and partial `(quiz_id, user_id)` |
+| `questions` | `id` | Unique `(quiz_id, source_order)` |
+| `question_options` | `id` | Unique `(question_id, id)` for composite references and `(question_id, source_order)` |
+| `attempts` | `id` | Unique `(quiz_id, user_id)` |
+| `attempt_questions` | `(attempt_id, question_id)` | Unique `(attempt_id, display_order)` |
+| `answers` | `id` | Unique `(attempt_id, question_id)` |
+| `violations` | `id` | Unique `(attempt_id, client_event_id)` and partial `(attempt_id, sequence_number)` |
+
 ## Entity relationship overview
 
 ```mermaid
@@ -153,6 +194,12 @@ erDiagram
 
 The Supabase user ID from the verified JWT is the identity source. Email is copied from the verified Google identity and is not accepted from onboarding input. The application profile stores authorization and onboarding data but does not duplicate passwords, access tokens, refresh tokens, or sessions.
 
+Checks:
+
+- `normalized_email = lower(btrim(email))` and both email values are non-empty.
+- `profile_completed_at` is null only for an incomplete profile; a completed profile requires non-empty name, roll number, branch code, and E.164 phone number.
+- `phone_e164` is null before onboarding or matches the E.164 shape after onboarding.
+
 ### `quizzes`
 
 | Column | Type | Notes |
@@ -172,6 +219,13 @@ The Supabase user ID from the verified JWT is the identity source. Email is copi
 | `updated_at` | `timestamptz` | Last update time. |
 
 Published quiz content is immutable. A changed quiz is created as a new draft or cloned version. `is_enabled` is an operational availability switch: disabling blocks new starts but does not change existing attempt expiry. Moving the quiz to `CLOSED` is the final action that ends active participation.
+
+Checks:
+
+- `duration_minutes > 0`.
+- `ends_at > starts_at`.
+- `results_published_at` is present if and only if status is `RESULTS_PUBLISHED`.
+- Draft, closed, and results-published quizzes cannot remain enabled.
 
 ### `quiz_enrollments`
 
@@ -195,6 +249,8 @@ Unique constraints:
 
 During onboarding, the submitted roll number and branch must match the eligible roster row for the verified Google email. Conflicting roster information is rejected for admin review rather than silently overwriting an existing profile.
 
+Checks require a normalized, non-empty email, roll number, and branch code. A linked `user_id` must remain unique within the quiz.
+
 ### `questions`
 
 | Column | Type | Notes |
@@ -208,6 +264,12 @@ During onboarding, the submitted roll number and branch must match the eligible 
 | `source_order` | `integer` | Admin ordering before randomization. |
 | `created_at` | `timestamptz` | Creation time. |
 | `updated_at` | `timestamptz` | Last update time. |
+
+Constraints:
+
+- Unique `(quiz_id, source_order)`.
+- `source_order >= 1`.
+- `positive_marks >= 0` and `negative_marks >= 0`.
 
 ### `question_options`
 
@@ -223,8 +285,10 @@ During onboarding, the submitted roll number and branch must match the eligible 
 Constraints:
 
 - Unique `(question_id, id)` to support composite answer integrity.
+- Unique `(question_id, source_order)`.
 - Partial unique index on `question_id` where `is_correct = true` to allow at most one correct option.
 - Publication validation requires exactly one correct option and at least two options.
+- `source_order >= 1` and option text is non-empty.
 
 ### `attempts`
 
@@ -251,6 +315,13 @@ Constraints:
 
 Unique constraint: `(quiz_id, user_id)`.
 
+Checks:
+
+- `expires_at >= started_at` and `qualifying_violation_count >= 0`.
+- `IN_PROGRESS` attempts have no submission, score, or answer-count fields.
+- `SUBMITTED` attempts require `submitted_at`, `submission_reason`, `scored_at`, score totals, and non-negative answer counts.
+- `maximum_score >= 0`; the final `score` may be negative because negative marking is supported.
+
 ### `attempt_questions`
 
 | Column | Type | Notes |
@@ -264,6 +335,8 @@ Unique constraint: `(quiz_id, user_id)`.
 
 Primary key: `(attempt_id, question_id)`. Display order is unique per attempt.
 
+Checks require `display_order >= 1`, non-negative snapshotted marks, and a JSON array containing at least two unique option UUIDs. Attempt creation validates that every UUID belongs to the snapshotted question.
+
 ### `answers`
 
 | Column | Type | Notes |
@@ -273,7 +346,7 @@ Primary key: `(attempt_id, question_id)`. Display order is unique per attempt.
 | `question_id` | `uuid` | References `questions.id`. |
 | `selected_option_id` | `uuid` | References an option belonging to the same question. |
 | `client_revision` | `bigint` | Monotonically increases per question. |
-| `last_idempotency_key` | `text` | Last accepted client mutation key. |
+| `last_idempotency_key` | `uuid` | Last accepted client mutation key. |
 | `answered_at` | `timestamptz` | Server acceptance time. |
 | `updated_at` | `timestamptz` | Last update time. |
 
@@ -283,6 +356,7 @@ Constraints:
 - Foreign key `(attempt_id, question_id)` to `attempt_questions`.
 - Foreign key `(question_id, selected_option_id)` to `question_options(question_id, id)`.
 - Upserts update only when the incoming `client_revision` is greater.
+- `client_revision >= 1`.
 
 ### `violations`
 
@@ -300,23 +374,39 @@ Constraints:
 
 Unique constraints: `(attempt_id, client_event_id)` and `(attempt_id, sequence_number)` when `sequence_number` is not null.
 
+Checks require a non-empty event type, `sequence_number >= 1` when present, and object-shaped JSON metadata. Request validation enforces the configured metadata byte limit. A qualifying event receives a sequence number in the same transaction that increments the attempt count.
+
+## Foreign-key delete policy
+
+- Historical profiles, quizzes, enrollments, attempts, snapshots, answers, and violations use `ON DELETE RESTRICT`/`NO ACTION`; exam records are never removed by a parent cascade.
+- Draft question deletion explicitly removes its options and then the question in one transaction. It is rejected once an attempt snapshot references the question or an answer references an option.
+- Account blocking, enrollment revocation, quiz closure, and attempt disqualification are state transitions, not deletes.
+- Foreign-key columns are indexed by a unique/composite constraint or by an additional index listed below.
+
 ## Required indexes
 
-- `profiles(normalized_email)` unique.
-- `profiles(roll_number)` unique where not null.
+Constraint-backed indexes must be reused rather than duplicated:
+
+- Unique `profiles(normalized_email)` and partial unique `profiles(roll_number)` where not null.
+- Unique enrollment keys `(quiz_id, normalized_email)`, `(quiz_id, roll_number)`, and partial `(quiz_id, user_id)` where linked.
+- Unique source ordering `(quiz_id, source_order)` for questions and `(question_id, source_order)` for options.
+- Unique attempt and snapshot keys `(quiz_id, user_id)`, `(attempt_id, question_id)`, and `(attempt_id, display_order)`.
+- Unique answer key `(attempt_id, question_id)` and violation keys `(attempt_id, client_event_id)` and partial `(attempt_id, sequence_number)`.
+
+Additional non-unique indexes:
+
 - `quizzes(status, starts_at, ends_at)`.
+- `quizzes(created_by)`.
 - `quiz_enrollments(normalized_email, status)`.
-- `quiz_enrollments(quiz_id, user_id)`.
-- `quiz_enrollments(quiz_id, roll_number)` unique.
-- `questions(quiz_id, source_order)`.
+- `quiz_enrollments(user_id)` where linked.
 - `attempts(user_id, status)`.
 - `attempts(quiz_id, status)`.
 - `attempts(status, expires_at)` for expiry scans.
-- `answers(attempt_id)`.
-- `violations(attempt_id, received_at)`.
-- `violations(attempt_id, sequence_number)`.
+- `attempt_questions(question_id)`.
+- `answers(question_id, selected_option_id)`.
+- `violations(attempt_id, received_at, id)` for stable cursor pagination.
 
-Indexes should be confirmed with query plans after realistic load tests; speculative indexes are avoided.
+Do not add a separate `answers(attempt_id)` or `violations(attempt_id, sequence_number)` index because the leading columns of the documented unique indexes already serve those access paths. Indexes must be confirmed with query plans after realistic load tests; speculative or overlapping indexes are avoided.
 
 ## Transaction boundaries
 
@@ -332,6 +422,7 @@ Indexes should be confirmed with query plans after realistic load tests; specula
 ### Attempt creation
 
 - Validate eligibility and schedule.
+- Select only published questions belonging to the attempt's quiz and validate every snapshotted option belongs to its question.
 - Insert the attempt.
 - Insert randomized `attempt_questions`.
 - Commit together.
