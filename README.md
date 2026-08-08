@@ -4,6 +4,13 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 
 > Status: architecture and design phase. Application code, database migrations, and infrastructure configuration have not been added yet.
 
+## Design Documentation
+
+- [High-level design](docs/hld.md)
+- [Database design](docs/database-design.md)
+- [API contract](docs/api-contract.md)
+- [Engineering standards and CI/CD](docs/engineering.md)
+
 ## Goals
 
 - Use managed services instead of maintaining custom infrastructure where practical.
@@ -12,25 +19,23 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 - Support offline answer recovery and idempotent synchronization.
 - Keep PostgreSQL as the authoritative source of quiz data.
 - Enforce quiz timing and authorization on the backend.
-- Persist answers synchronously and process scoring, analytics, and leaderboards asynchronously.
+- Persist answers synchronously and process scoring and leaderboards asynchronously.
 - Collect anti-cheating signals without continuously uploading camera footage.
 
 ## Target Architecture
 
-```text
-                    Next.js Frontend
-                       (Vercel)
-                           |
-                  Express API Services
-                       (Railway)
-                           |
-          +----------------+----------------+
-          |                |                |
-   Supabase Auth     Managed Redis    Supabase PostgreSQL
-   Google OAuth      Cache + BullMQ   Answers + source of truth
-          |                |                |
-   Supabase Storage  BullMQ Workers --------+
-   Private images    Secondary jobs
+```mermaid
+flowchart TD
+    USER[Student or Admin] --> FE[Next.js Frontend<br/>Vercel]
+    FE -->|Google OAuth| AUTH[Supabase Auth]
+    AUTH -->|JWT session| FE
+    FE -->|HTTPS and JWT| API[Express API<br/>Railway]
+    API -->|Verify JWKS| AUTH
+    API -->|Prisma| DB[(Supabase PostgreSQL<br/>Source of truth)]
+    API -->|Signed media access| STORAGE[Supabase Storage<br/>Private images]
+    API -->|Cache and secondary jobs| REDIS[(Managed Redis<br/>BullMQ)]
+    REDIS --> WORKER[BullMQ Worker<br/>Railway]
+    WORKER --> DB
 ```
 
 ### Managed services
@@ -43,14 +48,28 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 | Primary database | Supabase PostgreSQL |
 | Question media | Private Supabase Storage buckets |
 | Cache and queues | Persistent managed Redis with BullMQ support |
-| Background processing | A Railway worker service for scoring, leaderboards, and analytics |
+| Background processing | A Railway worker service for scoring, expiry, and leaderboards |
 
 The Railway and Supabase resources should be placed in the closest available common region. Redis must provide persistence, a `noeviction` policy, monitoring, and sufficient connection capacity for BullMQ.
 
 ## Authentication and Authorization
 
-```text
-Student -> Google OAuth -> Supabase Auth -> JWT -> API middleware -> Application
+```mermaid
+sequenceDiagram
+    actor Student
+    participant Frontend
+    participant Supabase as Supabase Auth
+    participant API as Backend API
+    participant DB as PostgreSQL
+
+    Student->>Frontend: Sign in with Google
+    Frontend->>Supabase: Start OAuth
+    Supabase-->>Frontend: Session and JWT
+    Frontend->>API: Request with bearer JWT
+    API->>Supabase: Verify JWT using JWKS
+    API->>DB: Resolve profile, role, and enrollment
+    DB-->>API: Authorized application identity
+    API-->>Frontend: Application response
 ```
 
 Supabase manages OAuth, sessions, refresh tokens, and JWT issuance. The backend validates token signature, issuer, audience, and expiry using Supabase JWKS. It does not implement a separate password or session system.
@@ -102,14 +121,21 @@ PostgreSQL is the source of truth and receives answer writes directly. Redis is 
 
 ## Answer Saving and Offline Synchronization
 
-```text
-Answer selected
-      |
-IndexedDB backup
-      |
-Answer API
-      |
-PostgreSQL revision-aware upsert
+```mermaid
+sequenceDiagram
+    actor Student
+    participant Browser
+    participant IndexedDB
+    participant API as Answer API
+    participant DB as PostgreSQL
+
+    Student->>Browser: Select answer
+    Browser->>IndexedDB: Save pending mutation
+    Browser->>API: Send answer and client revision
+    API->>DB: Lock attempt and revision-aware upsert
+    DB-->>API: Commit successful
+    API-->>Browser: SAVED
+    Browser->>IndexedDB: Remove confirmed mutation
 ```
 
 The API acknowledges an answer only after PostgreSQL commits it. This keeps the durability guarantee simple: every answer reported as saved is already in the source-of-truth database.
@@ -117,6 +143,15 @@ The API acknowledges an answer only after PostgreSQL commits it. This keeps the 
 Each answer request carries an idempotency key and a per-question client revision. Prisma handles normal validation and persistence, while a Prisma TypedSQL query performs `INSERT ... ON CONFLICT` and applies an update only when the incoming revision is newer. Requests use the database connection pool rather than opening a connection per student.
 
 The frontend keeps unsaved answers in IndexedDB. After reconnection it sends them through a bounded batch synchronization endpoint in their original sequence. Duplicate and out-of-order requests remain safe because of the unique constraint, idempotency key, and revision check.
+
+### Concurrent saves and query efficiency
+
+- Answer save and submission lock the same student's attempt row, preventing a late answer from committing after submission.
+- Conditional upserts accept only a higher client revision; the same revision with different content is rejected.
+- API replicas use small connection pools, while the Supabase pooler controls how many queries reach PostgreSQL concurrently.
+- Students update different attempt and answer rows, so synchronized saves do not create one shared row lock.
+- Question, option, answer, roster, and leaderboard data must be fetched with joins or bounded batch queries; database calls inside unbounded loops are not allowed.
+- Clicking Next changes the displayed question and does not send a second save when the selected answer is already saved or syncing.
 
 ### Submission
 
@@ -126,7 +161,7 @@ Submission is idempotent and database-backed:
 2. Mark it `SUBMITTED` and reject all later answer changes.
 3. Enqueue scoring after the submission commit.
 4. Let a recovery scan enqueue any submitted attempt that has no result, covering a temporary queue failure.
-5. Generate leaderboard and analytics data as secondary background work.
+5. Generate leaderboard data as secondary background work.
 
 The same process automatically submits an attempt when its backend-controlled expiry time is reached.
 
@@ -203,13 +238,12 @@ src/
 |-- modules/
 |   |-- auth/
 |   |-- users/
-|   |-- quiz-management/
-|   |-- exam-execution/
+|   |-- quizzes/
+|   |-- attempts/
 |   `-- violations/
 |-- jobs/
 |   |-- scoring/
 |   |-- leaderboard/
-|   |-- analytics/
 |   `-- expiry/
 |-- middleware/
 |-- database/
@@ -227,7 +261,7 @@ src/
 `-- worker.ts
 ```
 
-Each module owns its controller, service, repository, routes, validation schemas, and types. Admin endpoints live with the feature they manage instead of forming a separate domain module. Modules interact through exported service interfaces rather than directly using another module's repository.
+Each module starts with `routes.ts`, `schema.ts`, `service.ts`, and tests. A `queries.ts` file is added only when the module needs custom Prisma or TypedSQL queries. Types are inferred from Zod and Prisma instead of duplicated manually. Admin endpoints live with the feature they manage rather than forming a separate domain module.
 
 ## Planned Technical Stack
 
