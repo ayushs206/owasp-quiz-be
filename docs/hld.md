@@ -58,6 +58,14 @@ The frontend communicates with Supabase directly only for authentication. Applic
 
 ## Core flows
 
+### Quiz series and scheduling
+
+1. An admin creates a quiz series as the parent event or collection.
+2. The admin creates one or more quizzes inside the series.
+3. Each child quiz independently defines `starts_at`, `ends_at`, `duration_minutes`, roster, questions, lifecycle, and result publication.
+4. Student series responses contain only assigned child quizzes and their availability.
+5. A series may be deleted only when it contains no quizzes. Draft child quizzes must be deleted explicitly first.
+
 ### Authentication and enrollment
 
 1. The student selects **Continue with Google**.
@@ -125,6 +133,7 @@ sequenceDiagram
 5. Reject the mutation when server time is at or beyond `expires_at`.
 6. Confirm the question belongs to the attempt and the option belongs to that question.
 7. Upsert the answer only when `client_revision` is newer than the stored revision.
+   A null selected option records a cleared-answer tombstone at that revision.
 8. Treat the same revision with different content as a conflict.
 9. Return success after the transaction commits.
 10. The frontend removes the IndexedDB mutation and continues navigation only after success.
@@ -157,7 +166,15 @@ The answer and submission paths lock the same attempt row. Therefore, an answer 
 
 ### Expiry
 
-Every question, answer, and submission request checks `expires_at`. When an expired attempt is accessed, the API finalizes and scores it with reason `EXPIRED`. Closing a quiz runs the same finalization in database batches for attempts that never return after expiry.
+Every question, answer, and submission request checks `expires_at`. The frontend synchronizes against `serverTime`, exits the quiz at zero, and calls submission. At or after `expires_at`, the attempt is logically expired whether or not the browser remains connected. When an expired attempt is accessed, the API finalizes and scores it with reason `EXPIRED`. Closing a quiz and result publication run the same idempotent finalization in bounded database batches for attempts that never return after expiry. No custom session, queue, or continuously running worker is required for correctness because late writes are rejected using backend time.
+
+### Published answer review
+
+After results are published, a non-disqualified student may request a per-question review containing the immutable prompt, their final selected option, the correct option, and awarded marks. Before publication, the same operation returns `RESULTS_NOT_PUBLISHED`. Review responses use `Cache-Control: no-store`.
+
+### Administrative review audit
+
+Every approval or disqualification appends an `attempt_reviews` record containing the attempt, acting admin, decision, note, request ID, and server timestamp in the same transaction that updates the attempt's current review status. Audit rows are immutable.
 
 ### Violation enforcement
 

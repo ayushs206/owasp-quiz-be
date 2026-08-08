@@ -94,6 +94,7 @@ Admin routes live in the module responsible for the underlying feature.
 - Never call Prisma inside a loop over quizzes, questions, attempts, or students.
 - Fetch required relations with a bounded `select`/`include` or batched `IN` query.
 - Fetch one requested question, its options, and saved answer with one bounded query shape.
+- Fetch quiz-series pages and child quiz availability without a query per series or quiz.
 - Use `groupBy`, aggregate SQL, or a single reporting query for counts and leaderboards.
 - Batch signed-image URL generation instead of making one sequential storage request per question.
 - Paginate admin lists before loading child records.
@@ -157,6 +158,8 @@ Cover pure and service-level behavior:
 - Attempt timing and state transitions.
 - Scoring, including negative marking and unanswered questions.
 - Answer revision comparison.
+- Selected-to-cleared answer revision comparison.
+- Quiz-series membership and independent child scheduling.
 - Enrollment and role decisions.
 - Violation qualification and warning thresholds.
 
@@ -165,16 +168,22 @@ Cover pure and service-level behavior:
 Run against a disposable PostgreSQL instance:
 
 - First Google login creates or resolves one incomplete profile.
+- Admin question list/detail operations return complete editable question data.
+- Admin profile corrections preserve verified identity and emit a structured privileged-action audit log.
+- A quiz series returns only child quizzes assigned to the requesting student.
 - Onboarding links the verified identity and roster in one transaction.
 - A second Google identity cannot claim an existing roll number.
 - Repeated onboarding submissions remain idempotent.
 - Concurrent attempt creation produces one attempt.
 - Answer upserts reject stale revisions.
+- A newer clear tombstone prevents an older selected answer from reappearing.
 - Submission is idempotent.
 - Expired attempts reject answers.
 - A fifth qualifying violation force-submits exactly once.
 - Repeated synchronous submission returns the same stored score.
 - Published results respect review status.
+- Published answer review reveals correctness only after publication and never for disqualified attempts.
+- Attempt review updates append immutable reviewer, note, request ID, and timestamp history.
 - An answer racing with submission either commits before submission or is rejected afterward.
 - Two out-of-order answer requests preserve the highest revision.
 - The same revision with different option data returns a conflict.
@@ -203,6 +212,8 @@ Edge-case tests must include:
 - Database timeouts where the client does not know whether a commit succeeded.
 - Future, delayed, duplicated, and malformed violation events.
 - Result access before publication and after disqualification.
+- Browser timer expiry, disconnected expiry, and lazy idempotent finalization.
+- Draft-only quiz/series deletion, bounded question import, summary aggregates, CSV export privacy, and single-attempt admin submission.
 
 ### Load tests
 

@@ -18,9 +18,10 @@ The transactional model is normalized through fifth normal form where decomposit
 - Many-to-many relationships are represented by `quiz_enrollments` and `attempt_questions`; there are no unresolved independent multivalued dependencies or join dependencies.
 - Email normalization is represented once per identity context: `profiles` stores the verified application identity, while `quiz_enrollments` stores the imported roster identity that exists before a profile is linked.
 
-Three values are intentionally snapshotted or derived rather than dynamically joined from mutable source rows:
+Four structures are intentionally snapshotted, derived, or organizational rather than dynamically joined from mutable source rows:
 
 - `quiz_enrollments` keeps imported email, roll number, branch, and roster name so eligibility remains auditable before and after account linking.
+- `quiz_series` provides an organizational parent; child quizzes retain independent schedules and lifecycle state.
 - `attempt_questions` keeps option order and marks as an immutable attempt-time snapshot, so later source changes cannot alter an active or submitted exam.
 - `attempts` keeps final score and answer counts, written atomically at submission, so the published result is immutable and does not require repeated scoring queries.
 
@@ -40,6 +41,7 @@ Every Prisma migration and custom SQL migration must pass all five gates before 
 
 | Table | Primary key | Composite/candidate keys |
 | --- | --- | --- |
+| `quiz_series` | `id` | None beyond the primary key |
 | `profiles` | `id` | Unique `normalized_email`; partial unique `roll_number` when present |
 | `quizzes` | `id` | None beyond the primary key |
 | `quiz_enrollments` | `id` | Unique `(quiz_id, normalized_email)`, `(quiz_id, roll_number)`, and partial `(quiz_id, user_id)` |
@@ -49,11 +51,14 @@ Every Prisma migration and custom SQL migration must pass all five gates before 
 | `attempt_questions` | `(attempt_id, question_id)` | Unique `(attempt_id, display_order)` |
 | `answers` | `id` | Unique `(attempt_id, question_id)` |
 | `violations` | `id` | Unique `(attempt_id, client_event_id)` and partial `(attempt_id, sequence_number)` |
+| `attempt_reviews` | `id` | None beyond the primary key; append-only history |
 
 ## Entity relationship overview
 
 ```mermaid
 erDiagram
+    PROFILES ||--o{ QUIZ_SERIES : creates
+    QUIZ_SERIES ||--o{ QUIZZES : contains
     PROFILES ||--o{ QUIZZES : creates
     PROFILES ||--o{ QUIZ_ENROLLMENTS : links
     QUIZZES ||--o{ QUIZ_ENROLLMENTS : contains
@@ -67,6 +72,15 @@ erDiagram
     QUESTIONS ||--o{ ANSWERS : answered_by
     QUESTION_OPTIONS ||--o{ ANSWERS : selected_as
     ATTEMPTS ||--o{ VIOLATIONS : receives
+    ATTEMPTS ||--o{ ATTEMPT_REVIEWS : reviewed_by
+    PROFILES ||--o{ ATTEMPT_REVIEWS : performs
+
+    QUIZ_SERIES {
+        uuid id PK
+        string title
+        string description
+        uuid created_by FK
+    }
 
     PROFILES {
         uuid id PK
@@ -82,6 +96,7 @@ erDiagram
 
     QUIZZES {
         uuid id PK
+        uuid series_id FK
         string title
         int duration_minutes
         datetime starts_at
@@ -159,6 +174,16 @@ erDiagram
         boolean qualifies
         int sequence_number
     }
+
+    ATTEMPT_REVIEWS {
+        uuid id PK
+        uuid attempt_id FK
+        uuid reviewed_by FK
+        review_status decision
+        string note
+        uuid request_id
+        datetime created_at
+    }
 ```
 
 ## Enums
@@ -174,6 +199,19 @@ erDiagram
 | `review_status` | `NOT_REQUIRED`, `PENDING`, `APPROVED`, `DISQUALIFIED` |
 
 ## Tables
+
+### `quiz_series`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `uuid` | Primary key. |
+| `title` | `text` | Required parent event/series name. |
+| `description` | `text` | Nullable. |
+| `created_by` | `uuid` | References the creating admin profile. |
+| `created_at` | `timestamptz` | Creation time. |
+| `updated_at` | `timestamptz` | Last update time. |
+
+A series is an organizational container and does not replace child quiz timing. It may be deleted only when it contains no quizzes. Draft child quizzes must be deleted explicitly first; historical children keep the series retained.
 
 ### `profiles`
 
@@ -205,6 +243,7 @@ Checks:
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `uuid` | Primary key. |
+| `series_id` | `uuid` | Required reference to `quiz_series.id`. |
 | `title` | `text` | Required. |
 | `description` | `text` | Nullable. |
 | `instructions` | `text` | Nullable. |
@@ -344,7 +383,7 @@ Checks require `display_order >= 1`, non-negative snapshotted marks, and a JSON 
 | `id` | `uuid` | Primary key. |
 | `attempt_id` | `uuid` | References `attempts.id`. |
 | `question_id` | `uuid` | References `questions.id`. |
-| `selected_option_id` | `uuid` | References an option belonging to the same question. |
+| `selected_option_id` | `uuid` | Nullable reference to an option belonging to the same question; null records an explicit cleared-answer tombstone. |
 | `client_revision` | `bigint` | Monotonically increases per question. |
 | `last_idempotency_key` | `uuid` | Last accepted client mutation key. |
 | `answered_at` | `timestamptz` | Server acceptance time. |
@@ -357,6 +396,8 @@ Constraints:
 - Foreign key `(question_id, selected_option_id)` to `question_options(question_id, id)`.
 - Upserts update only when the incoming `client_revision` is greater.
 - `client_revision >= 1`.
+
+A row with `selected_option_id = null` is not counted as answered during scoring. Keeping the row and higher revision prevents delayed requests from restoring an older selection.
 
 ### `violations`
 
@@ -376,9 +417,24 @@ Unique constraints: `(attempt_id, client_event_id)` and `(attempt_id, sequence_n
 
 Checks require a non-empty event type, `sequence_number >= 1` when present, and object-shaped JSON metadata. Request validation enforces the configured metadata byte limit. A qualifying event receives a sequence number in the same transaction that increments the attempt count.
 
+### `attempt_reviews`
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | `uuid` | Primary key. |
+| `attempt_id` | `uuid` | References `attempts.id`. |
+| `reviewed_by` | `uuid` | References the acting admin `profiles.id`. |
+| `decision` | `review_status` | Only `APPROVED` or `DISQUALIFIED`. |
+| `note` | `text` | Nullable bounded admin explanation. |
+| `request_id` | `uuid` | Request correlation identifier. |
+| `created_at` | `timestamptz` | Immutable server timestamp. |
+
+Review rows are append-only. The current decision remains on `attempts.review_status` for efficient authorization, while this table is the authoritative audit history of who changed it and why.
+
 ## Foreign-key delete policy
 
 - Historical profiles, quizzes, enrollments, attempts, snapshots, answers, and violations use `ON DELETE RESTRICT`/`NO ACTION`; exam records are never removed by a parent cascade.
+- Historical quiz series and attempt reviews also use `ON DELETE RESTRICT`/`NO ACTION`.
 - Draft question deletion explicitly removes its options and then the question in one transaction. It is rejected once an attempt snapshot references the question or an answer references an option.
 - Account blocking, enrollment revocation, quiz closure, and attempt disqualification are state transitions, not deletes.
 - Foreign-key columns are indexed by a unique/composite constraint or by an additional index listed below.
@@ -396,6 +452,8 @@ Constraint-backed indexes must be reused rather than duplicated:
 Additional non-unique indexes:
 
 - `quizzes(status, starts_at, ends_at)`.
+- `quiz_series(created_by)`.
+- `quizzes(series_id, starts_at)`.
 - `quizzes(created_by)`.
 - `quiz_enrollments(normalized_email, status)`.
 - `quiz_enrollments(user_id)` where linked.
@@ -405,6 +463,7 @@ Additional non-unique indexes:
 - `attempt_questions(question_id)`.
 - `answers(question_id, selected_option_id)`.
 - `violations(attempt_id, received_at, id)` for stable cursor pagination.
+- `attempt_reviews(attempt_id, created_at, id)` for stable audit history.
 
 Do not add a separate `answers(attempt_id)` or `violations(attempt_id, sequence_number)` index because the leading columns of the documented unique indexes already serve those access paths. Indexes must be confirmed with query plans after realistic load tests; speculative or overlapping indexes are avoided.
 
@@ -449,12 +508,21 @@ Do not add a separate `answers(attempt_id)` or `violations(attempt_id, sequence_
 - Calculate and store the score when the count reaches five and force submission.
 - Commit as one unit.
 
+### Attempt review
+
+- Lock the attempt row.
+- Validate the acting application admin and requested decision.
+- Append one immutable `attempt_reviews` row with the request ID.
+- Update `attempts.review_status`.
+- Commit together.
+
 ## Concurrency invariants
 
 - Attempt creation relies on the unique `(quiz_id, user_id)` constraint rather than a read-then-insert assumption.
 - Onboarding relies on unique profile email/roll constraints so concurrent or repeated form submissions cannot create two student identities.
 - Answer save, submission, expiry, and qualifying-violation transitions lock the same attempt row.
 - The answer upsert updates only when the incoming revision is higher.
+- Selected and cleared answers share the same revision ordering.
 - The same revision with different content is rejected instead of choosing an arbitrary winner.
 - Submitted attempts already contain their score, making repeated submission idempotent.
 - Unique violation event and sequence constraints prevent duplicate violation counts.

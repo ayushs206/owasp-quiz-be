@@ -51,6 +51,14 @@ Errors use `application/problem+json`:
 
 ## Student endpoints
 
+### `GET /v1/quiz-series`
+
+Returns series containing at least one quiz assigned to the authenticated student. Each item includes `seriesId`, title, description, and `quizCount`.
+
+### `GET /v1/quiz-series/:seriesId/quizzes`
+
+Returns the authenticated student's assigned quizzes in the series. Child quizzes retain their own schedule, duration, availability, attempt, and result state.
+
 ### `GET /v1/me`
 
 Returns the authenticated application profile or the first-login onboarding requirement. The email comes from the verified Google identity and is read-only.
@@ -214,6 +222,7 @@ Rules:
 - A lower revision returns `409 STALE_ANSWER_REVISION` with the current revision.
 - Answers are rejected after expiry or submission.
 - Success means the answer is committed to PostgreSQL.
+- `selectedOptionId: null` clears a previous answer at the supplied revision. The nullable stored selection remains as a revision tombstone and scores as unanswered.
 
 ### `POST /v1/attempts/:attemptId/violations`
 
@@ -267,11 +276,25 @@ The backend calculates and stores the score in the same database transaction. Th
 
 Returns `403 RESULTS_NOT_PUBLISHED` until an admin publishes results. A disqualified attempt does not expose a normal score response.
 
+### `GET /v1/attempts/:attemptId/review`
+
+After result publication, returns each immutable attempt question with the student's final selection, the correct option, and awarded marks. Before publication it returns `403 RESULTS_NOT_PUBLISHED`; disqualified attempts return `403 ATTEMPT_DISQUALIFIED`. Responses use `Cache-Control: no-store`.
+
 ### `GET /v1/quizzes/:quizId/leaderboard`
 
 Returns a paginated leaderboard only after publication. The public student identifier must follow institutional privacy requirements.
 
 ## Admin endpoints
+
+### Quiz-series management
+
+- `POST /v1/admin/quiz-series`
+- `GET /v1/admin/quiz-series`
+- `GET /v1/admin/quiz-series/:seriesId`
+- `PATCH /v1/admin/quiz-series/:seriesId`
+- `DELETE /v1/admin/quiz-series/:seriesId`
+
+A series groups independently scheduled quizzes. Deletion is allowed only when the series contains no quizzes; draft child quizzes must be deleted explicitly first.
 
 ### Quiz management
 
@@ -284,17 +307,35 @@ Returns a paginated leaderboard only after publication. The public student ident
 - `POST /v1/admin/quizzes/:quizId/disable`
 - `POST /v1/admin/quizzes/:quizId/close`
 - `POST /v1/admin/quizzes/:quizId/clone`
+- `DELETE /v1/admin/quizzes/:quizId`
+- `GET /v1/admin/quizzes/:quizId/summary`
+- `GET /v1/admin/quizzes/:quizId/results/export`
 
 Only draft quizzes are editable. Publication validates schedule, question count, option count, and exactly one correct option per question. Enable/disable is idempotent. Disabling blocks new attempts without interrupting active attempts. Closing is final and synchronously finalizes active attempts in bounded database batches.
 
+Draft deletion is rejected after publication or once an attempt exists. The summary endpoint returns database aggregate counts. Result export is available only to admins and produces a bounded, streaming CSV without phone numbers.
+
 ### Question management
 
+- `GET /v1/admin/quizzes/:quizId/questions`
 - `POST /v1/admin/quizzes/:quizId/questions`
+- `POST /v1/admin/quizzes/:quizId/questions/import`
+- `GET /v1/admin/questions/:questionId`
 - `PATCH /v1/admin/questions/:questionId`
 - `DELETE /v1/admin/questions/:questionId`
 - `POST /v1/admin/questions/:questionId/image-url`
 
 The image URL endpoint returns a short-lived signed upload URL for a private Supabase Storage path.
+
+Question lists are paginated. Batch import accepts a validated bounded JSON payload, reports row-level errors, and is atomic only when explicitly requested; it never modifies a published quiz.
+
+### User administration
+
+- `GET /v1/admin/users`
+- `GET /v1/admin/users/:userId`
+- `PATCH /v1/admin/users/:userId`
+
+The update endpoint supports controlled role, account status, name, roll number, branch, and phone corrections. Verified identity email and Supabase user ID cannot be replaced through this endpoint. Role/status and identity corrections are audit logged.
 
 ### Roster management
 
@@ -310,6 +351,7 @@ Roster imports require email, roll number, and branch code; the optional roster 
 - `GET /v1/admin/attempts/:attemptId`
 - `GET /v1/admin/attempts/:attemptId/violations`
 - `POST /v1/admin/attempts/:attemptId/review`
+- `POST /v1/admin/attempts/:attemptId/submit`
 
 Review request:
 
@@ -321,6 +363,8 @@ Review request:
 ```
 
 Every review decision is logged with the acting admin and request ID.
+
+Single-attempt admin submission is idempotent, uses submission reason `ADMIN`, and follows the same lock-and-score transaction as normal submission.
 
 ### Results
 
@@ -360,10 +404,12 @@ Exact limits are environment configuration, not hard-coded contract values.
 | Option belongs to another question | Return `400 INVALID_QUESTION_OPTION`. |
 | Save arrives after expiry | Return `409 ATTEMPT_EXPIRED`. |
 | Save arrives after submission | Return `409 ATTEMPT_SUBMITTED`. |
+| Student clears an answer | Persist `selectedOptionId: null` only when its revision is newer; score it as unanswered. |
 | Database result is unknown to the client after timeout | Client retries the same revision and idempotency key. |
 | Manual submit is repeated | Return the existing submitted state with `200`. |
 | Result is not published | Return `403 RESULTS_NOT_PUBLISHED`. |
 | Attempt is disqualified | Return `403 ATTEMPT_DISQUALIFIED` instead of the normal score payload. |
+| Browser timer reaches zero | Exit the quiz immediately; backend time rejects later writes and the next request finalizes the attempt as expired. |
 | Violation event is duplicated | Store/count it at most once and return the current warning count. |
 | Violation payload is malformed or too large | Reject it without increasing the qualifying count. |
 | Browser is offline after changing an answer | Keep it in IndexedDB and block unseen-question navigation until the PUT succeeds. |

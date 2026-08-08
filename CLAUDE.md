@@ -65,11 +65,13 @@ Do not introduce a deferred component without explicit approval and measured evi
 ## Non-negotiable product rules
 
 - Supabase owns OAuth sessions and refresh tokens. The backend verifies bearer JWTs and stores no custom session.
+- A quiz series is the parent container for one or more independently scheduled quizzes.
 - Email comes from the verified Google identity and is never accepted from onboarding input.
 - TIET domain, roster eligibility, completed onboarding, account status, and role are checked server-side.
 - One student has at most one attempt per quiz through a database unique constraint.
 - Published quiz content is immutable; changes require a clone/new draft.
 - Backend server time controls start, expiry, close, and submission.
+- The frontend exits an attempt when its authoritative timer reaches zero; the backend treats the attempt as expired at that instant even if final score persistence occurs on the next request.
 - Attempt question and option order is snapshotted and stable.
 - Student APIs return one question at a time and never return correctness or marks.
 - Selecting an option writes to IndexedDB only. Next, Previous, or Submit performs one PUT when the answer changed.
@@ -209,7 +211,7 @@ Build the repository in small vertical slices:
 
 ### 2. Database
 
-- Implement the nine documented Prisma models.
+- Implement the eleven documented Prisma models, including quiz series and append-only attempt reviews.
 - Add database enums, unique constraints, foreign keys, and required indexes.
 - Generate and review the initial Prisma migration.
 - Use the pooled URL at runtime and direct URL for migrations.
@@ -223,6 +225,8 @@ Build the repository in small vertical slices:
 ### 4. Quiz administration
 
 - Draft quiz CRUD, questions/options, private image paths, roster import.
+- Quiz-series CRUD and assignment of quizzes to a series.
+- Admin question listing/detail, user administration, question batch import, summaries, exports, and single-attempt force submission.
 - Publish, enable, disable, close, clone, and result publication transitions.
 
 ### 5. Student attempt slice
@@ -235,6 +239,7 @@ Build the repository in small vertical slices:
 ### 6. Answers and submission
 
 - Revision-safe answer PUT.
+- Revision-safe answer clearing using a nullable selected option tombstone.
 - Attempt-row locking and navigation-save behavior.
 - Expiry checks, synchronous scoring, result access, and leaderboard.
 
@@ -351,6 +356,7 @@ At minimum cover:
 - Idempotent submission and scoring, including negative marks and unanswered questions.
 - Fifth qualifying violation force-submitting exactly once.
 - Result publication and disqualification access.
+- Published per-question answer review without exposing answer keys before publication.
 - Bounded query counts for hot paths.
 
 Run the repository scripts before declaring work complete. Once scaffolded, the standard commands must be:

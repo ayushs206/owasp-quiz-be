@@ -17,6 +17,7 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 
 - Use managed services instead of maintaining custom infrastructure where practical.
 - Keep the API stateless so it can scale horizontally.
+- Group independently scheduled quizzes inside admin-managed quiz series.
 - Protect accepted answers from loss during synchronized traffic spikes.
 - Preserve unsaved answers locally and retry them safely after connectivity returns.
 - Keep PostgreSQL as the authoritative source of quiz data.
@@ -91,6 +92,8 @@ Students must appear in an imported quiz roster and complete onboarding. A valid
 
 ## Quiz Rules
 
+- A quiz series is an organizational parent containing one or more quizzes.
+- Every quiz has its own schedule, duration, lifecycle, roster, attempts, and results.
 - Questions are single-choice MCQs with optional private images.
 - Students must complete their roster-validated profile before starting a quiz.
 - Each question supports configurable positive and optional negative marks.
@@ -103,12 +106,14 @@ Students must appear in an imported quiz roster and complete onboarding. A valid
 - Closing a quiz is final, rejects further answers, and submits remaining active attempts.
 - The backend creates `started_at` and `expires_at` timestamps using server time.
 - Attempt expiry is the earlier of the configured duration and the quiz closing time.
+- The frontend exits and submits when its server-synchronized timer reaches zero. The backend rejects all writes at or after `expires_at` even if the browser is disconnected.
 - Results and correct answers remain hidden until an admin publishes them.
 
 ## Core Data Model
 
 | Entity | Purpose |
 | --- | --- |
+| `quiz_series` | Admin-managed parent grouping for one or more independently scheduled quizzes |
 | `profiles` | Supabase identity, verified email, name, roll number, branch, phone, role, status, and onboarding completion |
 | `quizzes` | Quiz configuration, schedule, duration, admin availability toggle, lifecycle, and result publication |
 | `quiz_enrollments` | Imported roster entries and links to authenticated students |
@@ -118,6 +123,7 @@ Students must appear in an imported quiz roster and complete onboarding. A valid
 | `attempt_questions` | Immutable question and randomized option-order snapshot |
 | `answers` | Latest persisted selection and monotonic revision per question |
 | `violations` | Browser events, qualification decision, and warning sequence |
+| `attempt_reviews` | Append-only audit history for admin approval and disqualification decisions |
 
 Important constraints include:
 
@@ -163,6 +169,8 @@ sequenceDiagram
 
 Selecting or changing an option writes only to IndexedDB and sends no network request. When the student clicks Next, Previous, or Submit, the frontend sends the latest changed answer and waits for PostgreSQL confirmation before displaying an unseen question or completing submission. Unanswered and unchanged questions create no write.
 
+Clearing a previously selected answer uses the same revision-safe PUT with `selectedOptionId: null`. The stored nullable selection acts as a tombstone so a delayed older request cannot restore the cleared answer.
+
 Each answer request carries an idempotency key and a per-question client revision. Prisma handles validation and transactions; one small parameterized SQL helper performs `INSERT ... ON CONFLICT` and applies an update only when the incoming revision is newer. Requests use the database connection pool rather than opening a connection per student.
 
 If saving fails, the frontend keeps the answer in IndexedDB, shows a retry state, and does not move to an unseen question. On reload or reconnection it restores the pending selection and retries the same PUT request. Duplicate and out-of-order retries remain safe because of the unique constraint, idempotency key, and revision check.
@@ -187,6 +195,8 @@ Submission is idempotent and database-backed:
 5. Commit the submission and score together.
 
 Every question/answer request enforces expiry. The API finalizes an expired attempt when it is next accessed, and admin quiz closure finalizes remaining expired attempts in database batches.
+
+Expiry is logically effective at `expires_at`, not when finalization happens. The browser exits immediately using the synchronized server timer; a disconnected browser cannot extend the attempt because later writes are rejected.
 
 Queues and background workers are intentionally excluded from version one. They will be reconsidered only if load testing proves the simple API/database path cannot meet the target.
 
@@ -218,6 +228,8 @@ All endpoints are versioned under `/v1` and use standardized RFC 7807 problem re
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
+| `GET` | `/v1/quiz-series` | Assigned quiz series |
+| `GET` | `/v1/quiz-series/:seriesId/quizzes` | Assigned quizzes inside a series |
 | `GET` | `/v1/me` | Current profile and role |
 | `POST` | `/v1/onboarding` | Complete the first-login student profile |
 | `GET` | `/v1/quizzes` | Assigned quizzes |
@@ -229,6 +241,7 @@ All endpoints are versioned under `/v1` and use standardized RFC 7807 problem re
 | `POST` | `/v1/attempts/:attemptId/violations` | Record browser integrity events |
 | `POST` | `/v1/attempts/:attemptId/submit` | Persist final submission state |
 | `GET` | `/v1/attempts/:attemptId/result` | Read a published result |
+| `GET` | `/v1/attempts/:attemptId/review` | Review answers after result publication |
 | `GET` | `/v1/quizzes/:quizId/leaderboard` | Read a published leaderboard |
 
 ### Admin API
