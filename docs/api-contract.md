@@ -49,6 +49,16 @@ Errors use `application/problem+json`:
 | `429` | Rate limit exceeded. |
 | `503` | Temporary database or dependency failure; retry is allowed. |
 
+## Health endpoints
+
+### `GET /health/live`
+
+Unauthenticated process liveness check. Returns `200` with `{ "status": "ok" }` without calling dependencies.
+
+### `GET /health/ready`
+
+Unauthenticated dependency readiness check. Returns `200` with `{ "status": "ready" }` only when required dependencies are available, otherwise `503 SERVICE_NOT_READY` using the standard problem response.
+
 ## Student endpoints
 
 ### `GET /v1/quiz-series`

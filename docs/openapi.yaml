@@ -39,6 +39,38 @@ tags:
     description: Result publication and leaderboard administration
 
 paths:
+  /health/live:
+    get:
+      security: []
+      operationId: getLiveness
+      summary: Check whether the API process is running
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
+  /health/ready:
+    get:
+      security: []
+      operationId: getReadiness
+      summary: Check whether required dependencies are available
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+
   /v1/quiz-series:
     get:
       tags: [Quizzes]
@@ -1373,6 +1405,12 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+    TooManyRequests:
+      description: Rate limit exceeded
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
     ServiceUnavailable:
       description: Temporary database or dependency failure
       content:
@@ -1387,6 +1425,15 @@ components:
             $ref: '#/components/schemas/QuizDetail'
 
   schemas:
+    HealthStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready]
+
     Problem:
       type: object
       additionalProperties: false

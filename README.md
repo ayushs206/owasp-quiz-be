@@ -2,7 +2,19 @@
 
 Production-oriented backend architecture for the OWASP TIET Quiz Portal. The system is intended to serve the current batch of approximately 3,000 students and to be stress-tested against an exam-style burst of 10,000 concurrent users.
 
-> Status: architecture and design phase. Application code, database migrations, and infrastructure configuration have not been added yet.
+> Status: the strict TypeScript/Express foundation is implemented. Database models, authentication, and quiz feature slices remain to be built in the documented order.
+
+## Development
+
+```text
+pnpm install
+Copy-Item .env.example .env
+pnpm dev
+```
+
+The foundation includes environment validation, request IDs, structured logging, Helmet, strict CORS, rate limiting, RFC 7807 errors, and `/health/live` and `/health/ready`. Readiness intentionally returns `503` until the database slice provides its PostgreSQL dependency check.
+
+Run `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, and `pnpm build` before opening a pull request. CI runs the same checks and validates the OpenAPI contract.
 
 ## Design Documentation
 
