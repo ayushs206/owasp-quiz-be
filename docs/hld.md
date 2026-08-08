@@ -9,7 +9,6 @@ This document expands the architecture summarized in the project README. The fir
 - PostgreSQL is the source of truth.
 - An answer is reported as saved only after PostgreSQL commits it.
 - The API remains stateless and can be horizontally replicated.
-- Redis and BullMQ handle secondary work, not answer durability.
 - Supabase provides Google authentication, PostgreSQL, and private image storage.
 - Backend time, authorization, and attempt state are authoritative.
 - Complexity is added only after load tests show a measured need.
@@ -25,10 +24,6 @@ flowchart LR
     API -->|Verify JWKS| AUTH
     API -->|Prisma| DB[(Supabase PostgreSQL)]
     API -->|Signed media access| STORAGE[Supabase Storage<br/>Private images]
-    API -->|Cache, rate limits, jobs| REDIS[(Managed Redis<br/>BullMQ)]
-    REDIS --> WORKER[Worker<br/>Scoring, expiry, leaderboard]
-    WORKER --> DB
-    WORKER --> REDIS
 ```
 
 The frontend communicates with Supabase directly only for authentication. Application data is accessed through the backend API.
@@ -51,33 +46,14 @@ The frontend communicates with Supabase directly only for authentication. Applic
 - Validates requests with Zod.
 - Implements quiz, attempt, answer, violation, result, and admin APIs.
 - Uses one reusable Prisma client per process.
-- Writes answers directly to PostgreSQL.
-- Enqueues secondary jobs after durable state changes.
+- Writes answers, scores, submissions, and violations directly to PostgreSQL.
 
 ### PostgreSQL
 
-- Stores application identities, rosters, quizzes, attempts, answers, violations, and results.
+- Stores application identities, rosters, quizzes, attempts, answers, scores, and violations.
 - Enforces uniqueness and relational integrity.
 - Uses row-level transaction locks for submission and violation enforcement.
-- Receives normal queries through Prisma Client and performance-sensitive queries through Prisma TypedSQL.
-
-### Redis and BullMQ
-
-- Cache read-heavy, non-authoritative data.
-- Apply distributed API rate limits.
-- Queue scoring, leaderboard, and maintenance jobs.
-- Do not store the authoritative answer state.
-
-### Worker
-
-The initial deployment uses one worker service with separate BullMQ processors. It may be horizontally scaled later without splitting it into multiple services.
-
-Worker responsibilities:
-
-- Score submitted attempts.
-- Submit expired attempts found by a periodic database scan.
-- Recover submitted attempts that do not yet have results.
-- Generate leaderboards after quiz closure or result publication.
+- Receives normal queries through Prisma Client and one parameterized SQL helper for revision-aware answer upserts.
 
 ## Core flows
 
@@ -105,9 +81,19 @@ Supabase remains responsible for access-token renewal and refresh-token rotation
 3. Otherwise create one attempt in a transaction.
 4. Set `expires_at` to the earlier of `started_at + duration` and the quiz closing time.
 5. Snapshot question order, option order, and scoring values in `attempt_questions`.
-6. Return the attempt timing and question snapshot without correctness fields.
+6. Return the attempt timing and ID without question content.
 
 The unique `(quiz_id, user_id)` constraint makes concurrent start requests safe.
+
+### Load a question
+
+1. Request `GET /v1/attempts/:attemptId/questions/:displayOrder`.
+2. Validate ownership, attempt state, and expiry.
+3. Fetch one `attempt_questions` row with its question, randomized options, and saved answer.
+4. Return no correctness or scoring fields and set `Cache-Control: no-store`.
+5. The frontend displays one question and may prefetch only the next position.
+
+The quiz ID is used to start the attempt; the attempt ID is used afterward so every student keeps the same randomized order. A displayed question can still be inspected in the browser, but future questions and answer keys remain server-side.
 
 ### Save answer
 
@@ -154,18 +140,18 @@ An unavailable database produces a retryable error; the frontend retains the loc
 1. Lock the attempt row in a short transaction.
 2. Treat an already submitted attempt as a successful idempotent request.
 3. Reject submission from an unauthorized user.
-4. Set status, submission time, and submission reason.
-5. Commit before adding a scoring job.
-6. Enqueue scoring and return the durable submission state.
-7. A periodic recovery scan finds submitted attempts without results if queueing failed.
+4. Read the attempt snapshot and saved answers.
+5. Calculate score, maximum score, and answer counts.
+6. Store submission and score fields directly on the attempt.
+7. Commit and return the completed submission.
 
-Scoring reads only PostgreSQL data. Result publication remains a separate admin action.
+Scoring runs synchronously against PostgreSQL. Result publication remains a separate admin action.
 
 The answer and submission paths lock the same attempt row. Therefore, an answer racing with submission either commits first and is included, or sees the submitted state and is rejected; it cannot silently commit after final submission.
 
 ### Expiry
 
-Every answer and submission request checks `expires_at`, so correctness does not depend on the scheduler. A worker scan periodically finds expired `IN_PROGRESS` attempts and submits them with reason `EXPIRED`.
+Every question, answer, and submission request checks `expires_at`. When an expired attempt is accessed, the API finalizes and scores it with reason `EXPIRED`. Closing a quiz runs the same finalization in database batches for attempts that never return after expiry.
 
 ### Violation enforcement
 
@@ -173,10 +159,10 @@ Every answer and submission request checks `expires_at`, so correctness does not
 2. Validate detector fields, timestamps, confidence, and duration.
 3. Deduplicate repeated events within the configured cooldown.
 4. Determine whether the event qualifies under the active policy.
-5. Persist the raw event and qualifying incident.
+5. Persist one violation row containing the event and qualification decision.
 6. Increment the attempt's qualifying count in a transaction.
 7. Return warning actions for counts one through four.
-8. At count five, submit the attempt with reason `VIOLATION`, block re-entry, and set review status to `PENDING`.
+8. At count five, synchronously score and submit the attempt with reason `VIOLATION`, block re-entry, and set review status to `PENDING`.
 
 ML events initially require confidence of at least `0.95` sustained for at least three seconds. New detectors remain in shadow mode until calibrated. An admin makes the final validity or disqualification decision.
 
@@ -189,7 +175,7 @@ flowchart LR
     end
 
     subgraph Attempt_lifecycle[Attempt lifecycle]
-        AI[IN_PROGRESS] --> AS[SUBMITTED] --> ASC[SCORED]
+        AI[IN_PROGRESS] --> AS[SUBMITTED AND SCORED]
         AS --> RP[PENDING REVIEW]
         RP --> RA[APPROVED]
         RP --> RD[DISQUALIFIED]
@@ -207,12 +193,11 @@ flowchart LR
 ## Scaling approach
 
 - Scale stateless API replicas behind Railway networking.
-- Keep API and worker database pools deliberately small.
+- Keep each API replica's database pool deliberately small.
 - Use the Supabase pooled URL for runtime traffic and the direct URL for migrations.
-- Index all ownership, schedule, answer, and recovery-scan paths.
-- Cache only data that can safely be reconstructed from PostgreSQL.
+- Index all ownership, schedule, question, and answer paths.
 - Generate leaderboards after quiz closure instead of updating ranks on every answer.
-- Load-test direct answer writes before considering queued persistence.
+- Load-test the simple API/database path before adding Redis or queues.
 
 Target workload:
 
@@ -228,9 +213,6 @@ Target workload:
 | Failure | Behavior |
 | --- | --- |
 | PostgreSQL unavailable | Reject writes with retryable errors; frontend retains unsaved answers in IndexedDB. |
-| Redis unavailable | Answer saving continues; rate limiting and secondary jobs degrade temporarily. |
-| Worker unavailable | Submissions remain durable; scoring and leaderboards resume when the worker recovers. |
-| Queue add fails after submission | Recovery scan finds submitted attempts without results and re-enqueues them. |
 | API instance stops | Another stateless replica handles subsequent requests. |
 | Storage unavailable | Text remains available; image-based questions show a retryable media error. |
 | Duplicate requests | Unique constraints, revisions, and idempotent state transitions prevent duplicate effects. |
@@ -247,18 +229,18 @@ Target workload:
 | Answer save races with submit or expiry | Both lock the same attempt row before checking or changing state. |
 | Two submit requests | First request changes state; later requests return the existing submitted state. |
 | Multiple fifth-violation requests | Event uniqueness plus attempt-row locking allows only one transition to submitted. |
-| Scoring job is delivered more than once | Unique result row and idempotent scoring transaction. |
-| Admin publishes results twice | Publication transition is idempotent and audited once. |
+| Two scoring/submission requests | Attempt-row locking and current status make the synchronous transaction idempotent. |
+| Admin publishes results twice | Publication transition is idempotent. |
 
 Locks are scoped to one student's attempt. Students do not block one another during synchronized answer bursts.
 
 ## Query efficiency and N+1 prevention
 
 - Never issue one database query per question, option, enrollment, or attempt inside a loop.
-- Load attempt questions, options, and saved answers with bounded relation queries or one TypedSQL join.
+- Fetch the requested question, ordered options, and saved answer with one bounded query shape.
 - Use aggregate queries for admin counts, scoring, and leaderboards.
 - Paginate admin lists before loading related records.
-- Batch private image URL signing for the visible question set.
+- Sign only the current and optionally prefetched next question image.
 - Keep hot-path selections narrow and avoid returning answer-key columns.
 - Verify query counts in integration tests and inspect PostgreSQL query plans during load testing.
 
@@ -268,9 +250,9 @@ For 3,000 simultaneous saves, API replicas use small pools and the Supabase pool
 
 | Edge case | Expected behavior |
 | --- | --- |
-| Student clicks Next while save is pending | Navigation continues; IndexedDB retains the mutation and the request is not cancelled. Next does not send a duplicate save. |
+| Student clicks Next while save is pending | IndexedDB retains the mutation; the prefetched next question may display, and no duplicate save is sent. |
 | Student changes an option rapidly | Client coalesces pending changes; the highest revision wins on the server. |
-| Browser is offline | Show `Offline`, retain mutations, and synchronize when connectivity returns. |
+| Browser is offline | Show `Offline` and retain answer mutations. Current/prefetched questions remain usable, but unseen questions require connectivity. |
 | Manual submit has unsynchronized local answers | Frontend attempts sync first and does not show successful submission until synchronization and submit succeed. |
 | Offline through final expiry | Backend submits only answers it received; local-only data cannot be treated as submitted. |
 | Response is lost after a database commit | Client retries the same idempotency key and revision and receives the current saved state. |
@@ -296,13 +278,13 @@ For 3,000 simultaneous saves, API replicas use small pools and the Supabase pool
 - Rate-limit authentication-sensitive and write-heavy endpoints.
 - Do not log JWTs, answer content, image URLs with signatures, or sensitive ML metadata.
 - Keep camera processing in the browser and document consent and retention rules.
-- Audit quiz publication, result publication, role changes, and violation-review decisions.
+- Log privileged admin actions with request ID and actor ID.
 
 ## Initial non-goals
 
 - Microservices per module.
 - Custom authentication.
-- Queued answer persistence.
+- Redis, BullMQ, and background workers before measured demand.
 - Live per-answer leaderboard updates.
 - Read replicas before measured demand.
 - Continuous camera upload.

@@ -19,7 +19,7 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 - Support offline answer recovery and idempotent synchronization.
 - Keep PostgreSQL as the authoritative source of quiz data.
 - Enforce quiz timing and authorization on the backend.
-- Persist answers synchronously and process scoring and leaderboards asynchronously.
+- Persist answers and scores synchronously; calculate the leaderboard with a database query after quiz closure.
 - Collect anti-cheating signals without continuously uploading camera footage.
 
 ## Target Architecture
@@ -33,9 +33,6 @@ flowchart TD
     API -->|Verify JWKS| AUTH
     API -->|Prisma| DB[(Supabase PostgreSQL<br/>Source of truth)]
     API -->|Signed media access| STORAGE[Supabase Storage<br/>Private images]
-    API -->|Cache and secondary jobs| REDIS[(Managed Redis<br/>BullMQ)]
-    REDIS --> WORKER[BullMQ Worker<br/>Railway]
-    WORKER --> DB
 ```
 
 ### Managed services
@@ -47,10 +44,8 @@ flowchart TD
 | Authentication | Google OAuth through Supabase Auth |
 | Primary database | Supabase PostgreSQL |
 | Question media | Private Supabase Storage buckets |
-| Cache and queues | Persistent managed Redis with BullMQ support |
-| Background processing | A Railway worker service for scoring, expiry, and leaderboards |
 
-The Railway and Supabase resources should be placed in the closest available common region. Redis must provide persistence, a `noeviction` policy, monitoring, and sufficient connection capacity for BullMQ.
+The Railway API and Supabase project should be placed in the closest available common region. Redis, BullMQ, and a separate worker service are intentionally excluded from version one.
 
 ## Authentication and Authorization
 
@@ -117,13 +112,10 @@ Students must appear in an imported quiz roster and complete onboarding. A valid
 | `quiz_enrollments` | Imported roster entries and links to authenticated students |
 | `questions` | Question content, optional media path, marks, and negative marks |
 | `question_options` | Options, correctness, and source ordering |
-| `attempts` | Student attempt state, timing, submission, and review status |
+| `attempts` | Student attempt state, timing, submission, score totals, and review status |
 | `attempt_questions` | Immutable question and randomized option-order snapshot |
 | `answers` | Latest persisted selection and monotonic revision per question |
-| `violation_events` | Raw browser or ML telemetry received from the client |
-| `violation_incidents` | Deduplicated events that count toward enforcement |
-| `attempt_results` | Score, answer counts, rank, and scoring version |
-| `audit_logs` | Security-sensitive administrative actions |
+| `violations` | Browser/ML events, qualification decision, and warning sequence |
 
 Important constraints include:
 
@@ -133,7 +125,18 @@ Important constraints include:
 - One completed profile per Supabase user ID and roll number.
 - Revision-aware answer updates so an older offline request cannot overwrite a newer answer.
 
-PostgreSQL is the source of truth and receives answer writes directly. Redis is limited to caching, rate limits, short-lived locks, and BullMQ jobs; it is not part of the answer durability path.
+PostgreSQL is the source of truth and receives answer, submission, score, and violation writes directly.
+
+## Question Delivery
+
+The quiz ID is used only to start or resume an attempt. After that, the frontend uses the student-specific attempt ID:
+
+```text
+POST /v1/quizzes/:quizId/attempts
+GET  /v1/attempts/:attemptId/questions/:displayOrder
+```
+
+The backend returns one randomized question at a time with its options and saved answer. The frontend may prefetch only the next question. Responses use `Cache-Control: no-store` and never include correctness or marks. A displayed question can still be inspected in browser tools, but future questions and the answer key remain server-side.
 
 ## Answer Saving and Offline Synchronization
 
@@ -156,7 +159,7 @@ sequenceDiagram
 
 The API acknowledges an answer only after PostgreSQL commits it. This keeps the durability guarantee simple: every answer reported as saved is already in the source-of-truth database.
 
-Each answer request carries an idempotency key and a per-question client revision. Prisma handles normal validation and persistence, while a Prisma TypedSQL query performs `INSERT ... ON CONFLICT` and applies an update only when the incoming revision is newer. Requests use the database connection pool rather than opening a connection per student.
+Each answer request carries an idempotency key and a per-question client revision. Prisma handles validation and transactions; one small parameterized SQL helper performs `INSERT ... ON CONFLICT` and applies an update only when the incoming revision is newer. Requests use the database connection pool rather than opening a connection per student.
 
 The frontend keeps unsaved answers in IndexedDB. After reconnection it sends them through a bounded batch synchronization endpoint in their original sequence. Duplicate and out-of-order requests remain safe because of the unique constraint, idempotency key, and revision check.
 
@@ -175,13 +178,13 @@ Submission is idempotent and database-backed:
 
 1. Lock and validate the attempt in a short database transaction.
 2. Mark it `SUBMITTED` and reject all later answer changes.
-3. Enqueue scoring after the submission commit.
-4. Let a recovery scan enqueue any submitted attempt that has no result, covering a temporary queue failure.
-5. Generate leaderboard data as secondary background work.
+3. Calculate the score from the attempt snapshot and saved answers.
+4. Store score totals directly on the attempt.
+5. Commit the submission and score together.
 
-The same process automatically submits an attempt when its backend-controlled expiry time is reached.
+Every question/answer request enforces expiry. The API finalizes an expired attempt when it is next accessed, and admin quiz closure finalizes remaining expired attempts in database batches.
 
-Queued answer persistence is intentionally excluded from version one. It will be reconsidered only if the 10,000-user load test proves that pooled, indexed PostgreSQL upserts cannot meet the latency target after query and database tuning.
+Queues and background workers are intentionally excluded from version one. They will be reconsidered only if load testing proves the simple API/database path cannot meet the target.
 
 ## Anti-Cheating and Violation Enforcement
 
@@ -196,18 +199,18 @@ Potential signals include:
 - Copy or paste attempts.
 - Other supported browser integrity signals.
 
-Webcam ML cannot be guaranteed to be 100% accurate. Lighting, camera quality, accessibility requirements, occlusion, model bias, and modified clients can produce false results. Enforcement therefore uses configurable, calibrated, and reviewable incidents.
+Webcam ML cannot be guaranteed to be 100% accurate. Lighting, camera quality, accessibility requirements, occlusion, model bias, and modified clients can produce false results. Enforcement therefore uses configurable, calibrated, and reviewable violations.
 
 ### Enforcement policy
 
-- Qualifying incidents 1–3: display warnings.
+- Qualifying violations 1–3: display warnings.
 - Incident 4: display a final warning.
 - Incident 5: persist the violation, force-submit the attempt, block re-entry, and flag it for admin review.
 - An admin makes the final validity or disqualification decision.
 
 A browser-rule event may qualify directly. An ML event qualifies only when it satisfies the configured confidence and duration policy; the initial target is confidence of at least `0.95` sustained for at least three seconds. Repeated events of the same type are deduplicated within a configurable cooldown.
 
-New or materially changed detectors must run in shadow mode and be evaluated for false positives before they can contribute to automatic removal. Enforcement remains feature-flagged by event type and all overrides are audited.
+New or materially changed detectors must run in shadow mode and be evaluated for false positives before they can contribute to automatic removal. Enforcement remains configurable by event type and all admin overrides are logged.
 
 ## API Overview
 
@@ -223,7 +226,7 @@ All endpoints are versioned under `/v1` and use standardized RFC 7807 problem re
 | `GET` | `/v1/quizzes/:quizId` | Quiz instructions and availability |
 | `POST` | `/v1/quizzes/:quizId/attempts` | Start or resume the single attempt |
 | `GET` | `/v1/attempts/:attemptId` | Attempt state and server timing |
-| `GET` | `/v1/attempts/:attemptId/questions` | Attempt-specific question snapshot |
+| `GET` | `/v1/attempts/:attemptId/questions/:displayOrder` | Current question and randomized options |
 | `PUT` | `/v1/attempts/:attemptId/answers/:questionId` | Persist an answer revision |
 | `POST` | `/v1/attempts/:attemptId/answers/sync` | Synchronize an offline answer batch |
 | `POST` | `/v1/attempts/:attemptId/violations` | Record browser or ML events |
@@ -238,7 +241,7 @@ The admin API will provide:
 - Draft quiz and question management.
 - Scheduling, publishing, closing, and cloning quizzes.
 - CSV roster import and enrollment management.
-- Live attempt, worker, and submission summaries.
+- Live attempt and submission summaries.
 - Violation review and attempt validity decisions.
 - Result and leaderboard generation and publication.
 
@@ -258,42 +261,34 @@ src/
 |   |-- quizzes/
 |   |-- attempts/
 |   `-- violations/
-|-- jobs/
-|   |-- scoring/
-|   |-- leaderboard/
-|   `-- expiry/
 |-- middleware/
-|-- database/
+|-- lib/
 |   |-- prisma.ts
-|   `-- typed-sql/
+|   `-- supabase.ts
 |-- shared/
 |   |-- config/
 |   |-- errors/
 |   |-- logging/
-|   |-- redis/
-|   |-- queue/
 |   `-- security/
 |-- app.ts
-|-- server.ts
-`-- worker.ts
+`-- server.ts
 ```
 
-Each module starts with `routes.ts`, `schema.ts`, `service.ts`, and tests. A `queries.ts` file is added only when the module needs custom Prisma or TypedSQL queries. Types are inferred from Zod and Prisma instead of duplicated manually. Admin endpoints live with the feature they manage rather than forming a separate domain module.
+Each module starts with `routes.ts`, `schema.ts`, `service.ts`, and tests. A `queries.ts` file is added only for the revision-aware answer upsert or another measured need. Types are inferred from Zod and Prisma instead of duplicated manually. Admin endpoints live with the feature they manage rather than forming a separate domain module.
 
 ## Planned Technical Stack
 
 - Express with strict TypeScript.
 - Prisma Client for normal database access.
 - Prisma Migrate with reviewed SQL migrations.
-- Prisma TypedSQL for batched upserts, scoring, locking, and reporting queries.
+- One parameterized SQL helper for the revision-aware answer upsert.
 - Zod validation with an OpenAPI 3.1 contract.
-- BullMQ and `ioredis` for secondary background jobs only.
 - `jose` for Supabase JWT verification.
 - Pino structured logging.
 - Vitest, Supertest, and Testcontainers for automated tests.
 - k6 for exam-burst load testing.
 
-The API and worker each create one reusable `PrismaClient` with deliberately small connection pools. Runtime traffic uses the Supabase pooled database URL, while migrations use a direct database URL. Prisma manages only application tables and must not modify Supabase-managed `auth` or `storage` schemas.
+The API creates one reusable `PrismaClient` with a deliberately small connection pool. Runtime traffic uses the Supabase pooled database URL, while migrations use a direct database URL. Prisma manages only application tables and must not modify Supabase-managed `auth` or `storage` schemas.
 
 ## Implementation Roadmap
 
@@ -302,7 +297,7 @@ The API and worker each create one reusable `PrismaClient` with deliberately sma
 3. Build one end-to-end slice: roster, quiz, attempt, direct answer persistence, submission, and scoring.
 4. Run an early burst test and tune database indexes, queries, connection pools, and service replicas.
 5. Add administration, private media, offline synchronization, violations, results, and leaderboards.
-6. Add scoring recovery, expiry processing, auditing, observability, and operational runbooks.
+6. Add expiry/finalization checks, logging, and operational runbooks.
 7. Complete integration, security, failure-recovery, and final load testing.
 
 ## Performance Acceptance Targets
@@ -317,7 +312,7 @@ The principal load test models an exam rather than generic steady traffic:
 - Keep the answer API error rate below 0.1%.
 - Lose zero answers that the API acknowledged as accepted.
 - Keep database connection usage within configured pool limits during synchronized bursts.
-- Drain scoring and leaderboard backlogs automatically without affecting answer-save latency.
+- Keep synchronous submission and leaderboard queries within the measured performance targets.
 
 Google OAuth itself is outside the backend load test. Tests use valid Supabase test identities so JWT verification and application authorization remain part of the exercised request path.
 
@@ -325,6 +320,7 @@ Google OAuth itself is outside the backend load test. Tests use valid Supabase t
 
 - Custom password authentication or session storage.
 - PostgreSQL read replicas before measured demand requires them.
+- Redis, BullMQ, or a separate worker before measured demand requires them.
 - Continuous webcam upload or server-side video processing.
 - Automatic permanent disqualification based solely on an ML prediction.
 - Supporting free-text, numeric, or multi-select questions in the first release.

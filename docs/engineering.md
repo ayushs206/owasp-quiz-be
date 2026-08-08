@@ -8,13 +8,12 @@ Keep development predictable and production-safe without adding process that doe
 
 - Node.js LTS and `pnpm`.
 - Express with strict TypeScript.
-- Prisma Client, Prisma Migrate, and Prisma TypedSQL.
+- Prisma Client and Prisma Migrate.
 - Zod for input and environment validation.
-- BullMQ with `ioredis` for secondary jobs.
 - Pino for structured logs.
 - Vitest, Supertest, Testcontainers, and k6.
 - GitHub Actions for CI/CD.
-- Railway for API and worker deployment.
+- Railway for API deployment.
 - Supabase for Auth, PostgreSQL, and Storage.
 
 ## Module rules
@@ -23,7 +22,7 @@ Keep development predictable and production-safe without adding process that doe
 flowchart LR
     ROUTE[Route] --> VALIDATION[Zod validation]
     VALIDATION --> SERVICE[Service]
-    SERVICE --> PRISMA[Prisma or TypedSQL]
+    SERVICE --> PRISMA[Prisma or one SQL helper]
     PRISMA --> DB[(PostgreSQL)]
 ```
 
@@ -79,10 +78,10 @@ Admin routes live in the module responsible for the underlying feature.
 
 ## Prisma and SQL rules
 
-- Create one reusable `PrismaClient` per API or worker process.
-- Never create a Prisma client per request or queue job.
+- Create one reusable `PrismaClient` per API process.
+- Never create a Prisma client per request.
 - Use Prisma Client for normal CRUD and relations.
-- Use Prisma TypedSQL for revision-aware answer upserts, scoring, locks, and reporting.
+- Keep one parameterized SQL helper for the revision-aware answer upsert; use Prisma for everything else initially.
 - Keep transactions short and avoid network calls inside them.
 - Select only required columns on hot paths.
 - Paginate unbounded admin lists.
@@ -93,8 +92,8 @@ Admin routes live in the module responsible for the underlying feature.
 ### Avoiding N+1 queries
 
 - Never call Prisma inside a loop over quizzes, questions, attempts, or students.
-- Fetch required relations with a bounded `select`/`include`, a batched `IN` query, or one TypedSQL join.
-- Fetch an attempt's questions and options in at most three database round trips regardless of question count.
+- Fetch required relations with a bounded `select`/`include` or batched `IN` query.
+- Fetch one requested question, its options, and saved answer with one bounded query shape.
 - Use `groupBy`, aggregate SQL, or a single reporting query for counts and leaderboards.
 - Batch signed-image URL generation instead of making one sequential storage request per question.
 - Paginate admin lists before loading child records.
@@ -105,10 +104,9 @@ Initial query budgets:
 | Operation | Maximum normal database round trips |
 | --- | --- |
 | List assigned quizzes | 2 |
-| Load attempt with questions and answers | 3 |
+| Load one question with options and saved answer | 2 |
 | Save one answer | 3, including the attempt lock |
-| Submit an attempt | 2 inside the transaction |
-| Generate one result | 3 |
+| Submit and score an attempt | 3 inside the transaction |
 
 The budgets are guardrails, not a reason to combine unrelated logic into unreadable SQL.
 
@@ -118,7 +116,7 @@ The budgets are guardrails, not a reason to combine unrelated logic into unreada
 - Lock the attempt row while saving an answer, submitting, expiring, or applying a qualifying violation.
 - Use a conditional answer upsert so only a higher client revision can replace the stored answer.
 - Treat the same revision with different content as `REVISION_CONFLICT`.
-- Use unique result and incident constraints so retried jobs cannot duplicate effects.
+- Use unique violation constraints and attempt status checks so retries cannot duplicate effects.
 - Do not update shared quiz counters during every answer save; calculate aggregates separately.
 
 ## Security rules
@@ -128,11 +126,11 @@ The budgets are guardrails, not a reason to combine unrelated logic into unreada
 - Use the JWT subject as the profile identifier; never authenticate or link a profile from a client-submitted email.
 - Resolve roles and quiz access from application data.
 - Enforce ownership in services even when routes are role-protected.
-- Use parameterized Prisma or TypedSQL queries only.
+- Use Prisma queries or the single parameterized answer-upsert helper only.
 - Set strict CORS, Helmet headers, JSON body limits, and route rate limits.
 - Keep Supabase service credentials server-side.
 - Do not log access tokens, refresh tokens, correct answers, signed URLs, or sensitive metadata.
-- Audit privileged state changes.
+- Log privileged state changes with actor and request IDs.
 
 ## Logging
 
@@ -144,7 +142,6 @@ Every request receives a request ID. Structured logs should include only useful 
 - duration
 - user ID when authenticated
 - attempt or quiz ID when relevant
-- job name and job ID for workers
 - stable error code
 
 Avoid logging full request bodies. Violation metadata and student data require explicit field allowlists.
@@ -165,7 +162,7 @@ Cover pure and service-level behavior:
 
 ### Integration tests
 
-Run against disposable PostgreSQL and Redis instances:
+Run against a disposable PostgreSQL instance:
 
 - First Google login creates or resolves one incomplete profile.
 - Onboarding links the verified identity and roster in one transaction.
@@ -176,13 +173,13 @@ Run against disposable PostgreSQL and Redis instances:
 - Submission is idempotent.
 - Expired attempts reject answers.
 - A fifth qualifying violation force-submits exactly once.
-- Scoring jobs can retry without duplicate results.
+- Repeated synchronous submission returns the same stored score.
 - Published results respect review status.
 - An answer racing with submission either commits before submission or is rejected afterward.
 - Two out-of-order answer requests preserve the highest revision.
 - The same revision with different option data returns a conflict.
 - Concurrent fifth violations force-submit only once.
-- Loading many questions uses a bounded number of database queries.
+- Loading one question uses the same bounded query shape regardless of total quiz size.
 
 ### API tests
 
@@ -202,7 +199,6 @@ Edge-case tests must include:
 - Offline batches containing valid, duplicate, stale, and invalid entries.
 - Options that do not belong to the requested question.
 - Database timeouts where the client does not know whether a commit succeeded.
-- Queue or worker failure after durable submission.
 - Future, delayed, duplicated, and malformed violation events.
 - Result access before publication and after disqualification.
 
@@ -251,7 +247,7 @@ flowchart TD
     FORMAT --> LINT[Lint]
     LINT --> TYPES[Typecheck]
     TYPES --> UNIT[Unit tests]
-    UNIT --> SERVICES[Start PostgreSQL and Redis containers]
+    UNIT --> SERVICES[Start PostgreSQL container]
     SERVICES --> MIGRATE[Apply migrations to test database]
     MIGRATE --> INTEGRATION[Integration and API tests]
     INTEGRATION --> BUILD[Production build]
@@ -274,7 +270,7 @@ CI fails when:
 | Staging | Integration verification using separate Railway and Supabase resources. |
 | Production | Live quiz environment with restricted credentials and approvals. |
 
-Never share databases, Redis instances, storage buckets, OAuth redirect configuration, or secrets between staging and production.
+Never share databases, storage buckets, OAuth redirect configuration, or secrets between staging and production.
 
 ## Deployment pipeline
 
@@ -282,13 +278,12 @@ Never share databases, Redis instances, storage buckets, OAuth redirect configur
 flowchart TD
     MERGE[Merge to main] --> CI[CI checks pass]
     CI --> MIGRATE_STAGE[Apply staging migrations]
-    MIGRATE_STAGE --> DEPLOY_STAGE[Deploy API and worker to Railway staging]
+    MIGRATE_STAGE --> DEPLOY_STAGE[Deploy API to Railway staging]
     DEPLOY_STAGE --> SMOKE[Run staging smoke tests]
     SMOKE --> APPROVAL{Production approval}
     APPROVAL -->|Approved| MIGRATE_PROD[Apply compatible production migrations]
     MIGRATE_PROD --> DEPLOY_API[Deploy production API]
-    DEPLOY_API --> DEPLOY_WORKER[Deploy production worker]
-    DEPLOY_WORKER --> VERIFY[Health checks and monitoring]
+    DEPLOY_API --> VERIFY[Health checks and monitoring]
     APPROVAL -->|Rejected| STOP[Stop release]
 ```
 
@@ -296,9 +291,9 @@ flowchart TD
 
 On a successful merge to `main`:
 
-1. Build the API and worker from the same commit.
+1. Build the API.
 2. Apply pending Prisma migrations using the direct staging database URL.
-3. Deploy API and worker to Railway staging.
+3. Deploy the API to Railway staging.
 4. Run health and smoke tests.
 5. Mark the deployment failed if migrations, startup, or smoke tests fail.
 
@@ -309,25 +304,21 @@ Production deployment uses a manually approved GitHub environment:
 1. Confirm staging passed for the same commit.
 2. Apply backward-compatible production migrations.
 3. Deploy the API.
-4. Deploy the worker from the same commit.
-5. Verify health, database connectivity, Redis connectivity, and a read-only smoke test.
-6. Monitor errors and queue failures before completing the release.
+4. Verify health, database connectivity, and a read-only smoke test.
+5. Monitor errors before completing the release.
 
-The API and worker must remain compatible during rolling deployment. Schema changes therefore use expand-and-contract migrations when compatibility could otherwise break.
+Schema changes use expand-and-contract migrations when a rolling API deployment could otherwise break compatibility.
 
 ## Health checks
 
 - `/health/live`: process is running; does not call dependencies.
 - `/health/ready`: verifies required configuration and a lightweight PostgreSQL check.
-- Worker health reports process state, Redis connectivity, and processor registration.
-- Redis failure does not make the API unready when direct answer persistence remains available, but it must raise a degraded-service alert.
 
 ## Rollback
 
 - Redeploy the previous application artifact when application code fails.
 - Do not automatically reverse production database migrations.
 - Repair incompatible database changes with a reviewed forward migration.
-- Pause workers before rollback when a job payload or schema is incompatible.
 - Preserve submitted attempts and answers during every rollback procedure.
 
 ## Secrets
@@ -336,7 +327,6 @@ Store secrets in GitHub environment secrets, Railway variables, Supabase setting
 
 - pooled database URL
 - direct migration database URL
-- Redis URL
 - Supabase project URL and JWT/JWKS configuration
 - Supabase service credential for server-only storage operations
 - CORS origins
@@ -346,8 +336,8 @@ The final variable names will be defined when the application scaffold is create
 
 ## Simplicity guardrails
 
-- Do not add a service when a module in the API or worker is sufficient.
-- Do not add queued answer writes without failing the direct-write load target.
+- Do not add a separate service when a module in the API is sufficient.
+- Do not add Redis, workers, or queued writes without failing the simple load target.
 - Do not add read replicas without measured read pressure.
 - Do not add Kubernetes, service meshes, event buses, or custom auth.
 - Prefer built-in Supabase, Railway, PostgreSQL, Prisma, and GitHub Actions capabilities.

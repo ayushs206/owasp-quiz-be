@@ -7,7 +7,7 @@
 - Supabase-managed `auth` and `storage` schemas are not modified by Prisma.
 - Runtime traffic uses the pooled connection URL; migrations use the direct URL.
 - IDs use UUIDs and timestamps use timezone-aware PostgreSQL timestamps.
-- Destructive cascades are avoided for exam records and audit data.
+- Destructive cascades are avoided for exam records.
 
 ## Entity relationship overview
 
@@ -25,11 +25,7 @@ erDiagram
     ATTEMPTS ||--o{ ANSWERS : records
     QUESTIONS ||--o{ ANSWERS : answered_by
     QUESTION_OPTIONS ||--o{ ANSWERS : selected_as
-    ATTEMPTS ||--o{ VIOLATION_EVENTS : receives
-    ATTEMPTS ||--o{ VIOLATION_INCIDENTS : counts
-    VIOLATION_EVENTS ||--o| VIOLATION_INCIDENTS : qualifies_as
-    ATTEMPTS ||--o| ATTEMPT_RESULTS : produces
-    PROFILES ||--o{ AUDIT_LOGS : performs
+    ATTEMPTS ||--o{ VIOLATIONS : receives
 
     PROFILES {
         uuid id PK
@@ -89,6 +85,11 @@ erDiagram
         datetime expires_at
         int qualifying_violation_count
         review_status review_status
+        decimal score
+        decimal maximum_score
+        int correct_count
+        int incorrect_count
+        int unanswered_count
     }
 
     ATTEMPT_QUESTIONS {
@@ -109,35 +110,16 @@ erDiagram
         datetime answered_at
     }
 
-    VIOLATION_EVENTS {
+    VIOLATIONS {
         uuid id PK
         uuid attempt_id FK
+        uuid client_event_id UK
         violation_source source
         string type
         decimal confidence
         int duration_ms
-    }
-
-    VIOLATION_INCIDENTS {
-        uuid id PK
-        uuid attempt_id FK
-        uuid event_id FK
+        boolean qualifies
         int sequence_number
-    }
-
-    ATTEMPT_RESULTS {
-        uuid attempt_id PK, FK
-        decimal score
-        decimal maximum_score
-        int scoring_version
-    }
-
-    AUDIT_LOGS {
-        uuid id PK
-        uuid actor_id FK
-        string action
-        string entity_type
-        uuid entity_id
     }
 ```
 
@@ -149,7 +131,7 @@ erDiagram
 | `account_status` | `ACTIVE`, `BLOCKED` |
 | `quiz_status` | `DRAFT`, `PUBLISHED`, `CLOSED`, `RESULTS_PUBLISHED` |
 | `enrollment_status` | `ELIGIBLE`, `REVOKED` |
-| `attempt_status` | `IN_PROGRESS`, `SUBMITTED`, `SCORED` |
+| `attempt_status` | `IN_PROGRESS`, `SUBMITTED` |
 | `submission_reason` | `USER`, `EXPIRED`, `VIOLATION`, `ADMIN` |
 | `review_status` | `NOT_REQUIRED`, `PENDING`, `APPROVED`, `DISQUALIFIED` |
 | `violation_source` | `BROWSER`, `ML` |
@@ -262,6 +244,12 @@ Constraints:
 | `submission_reason` | `submission_reason` | Nullable until submission. |
 | `qualifying_violation_count` | `integer` | Defaults to zero. |
 | `review_status` | `review_status` | Defaults to `NOT_REQUIRED`. |
+| `score` | `numeric(10,2)` | Nullable until submission. |
+| `maximum_score` | `numeric(10,2)` | Nullable until submission. |
+| `correct_count` | `integer` | Nullable until submission. |
+| `incorrect_count` | `integer` | Nullable until submission. |
+| `unanswered_count` | `integer` | Nullable until submission. |
+| `scored_at` | `timestamptz` | Nullable until submission scoring completes. |
 | `created_at` | `timestamptz` | Creation time. |
 | `updated_at` | `timestamptz` | Last update time. |
 
@@ -300,12 +288,13 @@ Constraints:
 - Foreign key `(question_id, selected_option_id)` to `question_options(question_id, id)`.
 - Upserts update only when the incoming `client_revision` is greater.
 
-### `violation_events`
+### `violations`
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | `uuid` | Primary key. |
 | `attempt_id` | `uuid` | References `attempts.id`. |
+| `client_event_id` | `uuid` | Client-generated event ID; unique per attempt. |
 | `source` | `violation_source` | Browser rule or ML. |
 | `type` | `text` | Stable event identifier. |
 | `confidence` | `numeric(5,4)` | Nullable for browser events. |
@@ -314,46 +303,10 @@ Constraints:
 | `client_occurred_at` | `timestamptz` | Client-reported event time. |
 | `received_at` | `timestamptz` | Server time. |
 | `metadata` | `jsonb` | Validated, size-limited metadata. |
+| `qualifies` | `boolean` | Whether this event counts toward enforcement. |
+| `sequence_number` | `integer` | Nullable warning/removal count. |
 
-### `violation_incidents`
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `attempt_id` | `uuid` | References `attempts.id`. |
-| `event_id` | `uuid` | References the qualifying event. |
-| `type` | `text` | Incident type. |
-| `sequence_number` | `integer` | Warning/removal count. |
-| `created_at` | `timestamptz` | Server time. |
-
-Unique constraints: `(attempt_id, event_id)` and `(attempt_id, sequence_number)`.
-
-### `attempt_results`
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `attempt_id` | `uuid` | Primary key and reference to `attempts.id`. |
-| `score` | `numeric(10,2)` | Final score. |
-| `maximum_score` | `numeric(10,2)` | Snapshot-based maximum. |
-| `correct_count` | `integer` | Correct answers. |
-| `incorrect_count` | `integer` | Incorrect answers. |
-| `unanswered_count` | `integer` | Unanswered questions. |
-| `scoring_version` | `integer` | Supports controlled recalculation. |
-| `scored_at` | `timestamptz` | Completion time. |
-
-### `audit_logs`
-
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `actor_id` | `uuid` | Nullable reference to `profiles.id`. |
-| `action` | `text` | Stable action identifier. |
-| `entity_type` | `text` | Target category. |
-| `entity_id` | `uuid` | Nullable target ID. |
-| `metadata` | `jsonb` | Size-limited audit context. |
-| `created_at` | `timestamptz` | Server time. |
-
-Audit rows are append-only through application permissions.
+Unique constraints: `(attempt_id, client_event_id)` and `(attempt_id, sequence_number)` when `sequence_number` is not null.
 
 ## Required indexes
 
@@ -368,9 +321,8 @@ Audit rows are append-only through application permissions.
 - `attempts(quiz_id, status)`.
 - `attempts(status, expires_at)` for expiry scans.
 - `answers(attempt_id)`.
-- `violation_events(attempt_id, received_at)`.
-- `violation_incidents(attempt_id, sequence_number)`.
-- `attempt_results(scored_at)`.
+- `violations(attempt_id, received_at)`.
+- `violations(attempt_id, sequence_number)`.
 
 Indexes should be confirmed with query plans after realistic load tests; speculative indexes are avoided.
 
@@ -402,22 +354,17 @@ Indexes should be confirmed with query plans after realistic load tests; specula
 ### Submission
 
 - Lock the attempt row.
-- Set submission state only if still in progress.
-- Commit before enqueueing scoring.
+- Read the attempt snapshot and saved answers.
+- Calculate score and answer counts.
+- Store submission and score fields on the attempt.
+- Commit together.
 
 ### Qualifying violation
 
-- Insert the event and deduplicated incident.
+- Insert the deduplicated violation row.
 - Lock and increment the attempt counter.
-- Force submission when the count reaches five.
+- Calculate and store the score when the count reaches five and force submission.
 - Commit as one unit.
-
-### Scoring
-
-- Lock or idempotently check the result row.
-- Read the attempt snapshot and answers.
-- Insert the result and move the attempt to `SCORED`.
-- Commit together.
 
 ## Concurrency invariants
 
@@ -426,14 +373,14 @@ Indexes should be confirmed with query plans after realistic load tests; specula
 - Answer save, submission, expiry, and qualifying-violation transitions lock the same attempt row.
 - The answer upsert updates only when the incoming revision is higher.
 - The same revision with different content is rejected instead of choosing an arbitrary winner.
-- One result row per attempt makes scoring retries idempotent.
-- Unique event and incident constraints prevent duplicate violation counts.
+- Submitted attempts already contain their score, making repeated submission idempotent.
+- Unique violation event and sequence constraints prevent duplicate violation counts.
 - PostgreSQL's normal `READ COMMITTED` isolation plus explicit row locks is sufficient initially; stronger isolation is added only if testing exposes an invariant that needs it.
 
 ## Query patterns and N+1 prevention
 
 - Assigned quizzes: query eligible enrollments joined to quiz summaries; do not query each quiz separately.
-- Attempt load: fetch attempt questions, questions/options, and saved answers in a fixed number of batched queries.
+- Current question: fetch one `attempt_questions` row joined to its question, ordered options, and saved answer.
 - Scoring: use one set-based query over attempt questions, options, and answers.
 - Leaderboard: use one aggregate/window query after quiz closure.
 - Admin summaries: use grouped counts rather than loading attempts and counting in application memory.
@@ -456,7 +403,7 @@ No service may execute a database call inside a loop over an unbounded result se
 
 Retention periods must be approved before production. Until then:
 
-- Keep attempts, answers, results, and audit logs.
+- Keep attempts, answers, and scores according to institutional policy.
 - Restrict phone-number access to the student and authorized admins; never include it in logs, exports, results, or leaderboards unless explicitly approved.
 - Keep violation metadata only as long as required for review and institutional policy.
 - Do not store camera video.

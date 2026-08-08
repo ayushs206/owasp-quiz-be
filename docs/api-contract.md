@@ -147,33 +147,34 @@ Concurrent calls return the same attempt because one attempt is allowed per stud
 
 Returns attempt timing, status, submission reason, warning count, review status, and server time. It does not expose another student's attempt.
 
-### `GET /v1/attempts/:attemptId/questions`
+### `GET /v1/attempts/:attemptId/questions/:displayOrder`
 
-Returns the immutable attempt-specific display order:
+Returns one question from the immutable attempt-specific order. The backend validates ownership, state, and expiry on every request and sets `Cache-Control: no-store`.
 
 ```json
 {
   "attemptId": "uuid",
-  "questions": [
-    {
-      "id": "uuid",
-      "displayOrder": 1,
-      "prompt": "Question text",
-      "imageUrl": null,
-      "options": [
-        { "id": "uuid", "text": "Option A" },
-        { "id": "uuid", "text": "Option B" }
-      ],
-      "savedAnswer": {
-        "selectedOptionId": "uuid",
-        "clientRevision": 3
-      }
+  "questionCount": 30,
+  "question": {
+    "id": "uuid",
+    "displayOrder": 1,
+    "prompt": "Question text",
+    "imageUrl": null,
+    "options": [
+      { "id": "uuid", "text": "Option A" },
+      { "id": "uuid", "text": "Option B" }
+    ],
+    "savedAnswer": {
+      "selectedOptionId": "uuid",
+      "clientRevision": 3
     }
-  ]
+  },
+  "hasPrevious": false,
+  "hasNext": true
 }
 ```
 
-Private image URLs are short-lived. Correctness and marks are not included.
+Private image URLs are short-lived. Correctness and marks are not included. The frontend may prefetch only the next display position; the complete question set is never returned in one response.
 
 ### `PUT /v1/attempts/:attemptId/answers/:questionId`
 
@@ -269,6 +270,8 @@ Response:
 
 Idempotently submits the attempt. Repeated calls return the existing submitted state.
 
+The backend calculates and stores the score in the same database transaction. The score remains hidden from this response until results are published.
+
 ```json
 {
   "attemptId": "uuid",
@@ -300,7 +303,7 @@ Returns a paginated leaderboard only after publication. The public student ident
 - `POST /v1/admin/quizzes/:quizId/close`
 - `POST /v1/admin/quizzes/:quizId/clone`
 
-Only draft quizzes are editable. Publication validates schedule, question count, option count, and exactly one correct option per question. Enable/disable is idempotent. Disabling blocks new attempts without interrupting active attempts. Closing is final and triggers submission of active attempts.
+Only draft quizzes are editable. Publication validates schedule, question count, option count, and exactly one correct option per question. Enable/disable is idempotent. Disabling blocks new attempts without interrupting active attempts. Closing is final and synchronously finalizes active attempts in bounded database batches.
 
 ### Question management
 
@@ -335,15 +338,14 @@ Review request:
 }
 ```
 
-Every review decision creates an audit log.
+Every review decision is logged with the acting admin and request ID.
 
 ### Results
 
-- `POST /v1/admin/quizzes/:quizId/results/recalculate`
 - `POST /v1/admin/quizzes/:quizId/results/publish`
 - `GET /v1/admin/quizzes/:quizId/leaderboard`
 
-Publishing is idempotent and audited.
+Scores are stored on attempts during synchronous submission. Publishing is idempotent.
 
 ## Rate-limit groups
 
@@ -379,16 +381,16 @@ Exact limits are environment configuration, not hard-coded contract values.
 | Save arrives after submission | Return `409 ATTEMPT_SUBMITTED`. |
 | Database result is unknown to the client after timeout | Client retries the same revision and idempotency key. |
 | Manual submit is repeated | Return the existing submitted state with `200`. |
-| Worker is unavailable after submission | Submission remains successful; scoring recovery handles the missing result. |
 | Result is not published | Return `403 RESULTS_NOT_PUBLISHED`. |
 | Attempt is disqualified | Return `403 ATTEMPT_DISQUALIFIED` instead of the normal score payload. |
 | Violation event is duplicated | Store/count it at most once and return the current warning count. |
 | Violation payload is malformed or too large | Reject it without increasing the qualifying count. |
+| Browser is offline while requesting an unseen question | Frontend keeps saved local answers but cannot load that question until connectivity returns. |
 
 ## Query-shape expectations
 
 - Quiz lists are paginated and include their availability in a bounded query plan.
-- Attempt questions, options, and saved answers are loaded in no more than three database round trips.
+- One question request loads its snapshot, ordered options, and saved answer with one bounded query shape.
 - Batch answer sync locks the attempt once and performs set-based or bounded upserts.
 - Admin counts use database aggregates rather than application-side loops.
 - Leaderboards use a set-based aggregate/window query.
