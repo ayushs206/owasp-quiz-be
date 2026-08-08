@@ -334,7 +334,7 @@ Store secrets in GitHub environment secrets, Railway variables, Supabase setting
 - CORS origins
 - logging level
 
-The final variable names will be defined when the application scaffold is created.
+The documented backend variable names and safe local placeholders are maintained in `.env.example`.
 
 ## Simplicity guardrails
 
