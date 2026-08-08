@@ -108,43 +108,48 @@ sequenceDiagram
 
     Student->>Browser: Select answer
     Browser->>IndexedDB: Store pending mutation
-    Browser->>API: PUT answer with revision
+    Student->>Browser: Click Next, Previous, or Submit
+    Browser->>API: PUT latest answer with revision
     API->>API: Validate JWT, ownership, state, and option
     API->>DB: Lock attempt and revision-aware upsert
     DB-->>API: Transaction committed
     API-->>Browser: SAVED
     Browser->>IndexedDB: Remove confirmed mutation
+    Browser->>Browser: Continue navigation or submission
 ```
 
-1. Begin a short transaction and lock the student's attempt row.
-2. Confirm the attempt belongs to the student and is `IN_PROGRESS`.
-3. Reject the mutation when server time is at or beyond `expires_at`.
-4. Confirm the question belongs to the attempt and the option belongs to that question.
-5. Upsert the answer only when `client_revision` is newer than the stored revision.
-6. Treat the same revision with different content as a conflict.
-7. Return success after the transaction commits.
-8. The frontend removes the matching IndexedDB mutation only after success.
+1. Selecting or changing an option writes only to IndexedDB.
+2. Next, Previous, and Submit trigger a PUT only when the answer changed.
+3. The backend begins a short transaction and locks the student's attempt row.
+4. Confirm the attempt belongs to the student and is `IN_PROGRESS`.
+5. Reject the mutation when server time is at or beyond `expires_at`.
+6. Confirm the question belongs to the attempt and the option belongs to that question.
+7. Upsert the answer only when `client_revision` is newer than the stored revision.
+8. Treat the same revision with different content as a conflict.
+9. Return success after the transaction commits.
+10. The frontend removes the IndexedDB mutation and continues navigation only after success.
 
-An unavailable database produces a retryable error; the frontend retains the local mutation.
+An unanswered or unchanged question sends no PUT. An unavailable database produces a retryable error; the frontend retains the local mutation and blocks navigation to an unseen question.
 
-### Offline synchronization
+### Local answer recovery
 
 - The frontend assigns a monotonically increasing revision per question.
-- Pending mutations are stored in IndexedDB before the network request.
-- Reconnected clients send batches of at most 100 answers.
-- The backend processes the batch transactionally or in bounded chunks.
-- Duplicate or stale revisions do not overwrite newer answers.
+- Pending mutations are stored in IndexedDB immediately after selection.
+- Reloading the page restores the pending selection.
+- Reconnection retries the same single-answer PUT before navigation continues.
+- Duplicate or stale retries do not overwrite newer answers.
 - The client reconciles with the server state after a device change or sequence reset.
 
 ### Submission and scoring
 
-1. Lock the attempt row in a short transaction.
-2. Treat an already submitted attempt as a successful idempotent request.
-3. Reject submission from an unauthorized user.
-4. Read the attempt snapshot and saved answers.
-5. Calculate score, maximum score, and answer counts.
-6. Store submission and score fields directly on the attempt.
-7. Commit and return the completed submission.
+1. The frontend first saves the changed current answer through the normal PUT endpoint.
+2. After save confirmation, lock the attempt row in a short submission transaction.
+3. Treat an already submitted attempt as a successful idempotent request.
+4. Reject submission from an unauthorized user.
+5. Read the attempt snapshot and saved answers.
+6. Calculate score, maximum score, and answer counts.
+7. Store submission and score fields directly on the attempt.
+8. Commit and return the completed submission.
 
 Scoring runs synchronously against PostgreSQL. Result publication remains a separate admin action.
 
@@ -204,7 +209,7 @@ Target workload:
 
 - 10,000 authenticated students ramping into an exam.
 - Synchronized attempt starts.
-- Concurrent answer spikes and offline sync batches.
+- Synchronized Next/save spikes and offline answer retries.
 - 10,000 submissions in a short closing window.
 - Answer-save p95 below 300 ms with less than 0.1% API errors.
 - Zero loss of answers acknowledged as saved.
@@ -251,10 +256,10 @@ For 3,000 simultaneous saves, API replicas use small pools and the Supabase pool
 
 | Edge case | Expected behavior |
 | --- | --- |
-| Student clicks Next while save is pending | IndexedDB retains the mutation; the prefetched next question may display, and no duplicate save is sent. |
+| Student clicks Next after changing an answer | Send one PUT, wait for confirmation, then display the prefetched next question. |
 | Student changes an option rapidly | Client coalesces pending changes; the highest revision wins on the server. |
-| Browser is offline | Show `Offline` and retain answer mutations. Current/prefetched questions remain usable, but unseen questions require connectivity. |
-| Manual submit has unsynchronized local answers | Frontend attempts sync first and does not show successful submission until synchronization and submit succeed. |
+| Browser is offline | Show `Offline`, retain the pending answer, and block navigation to an unseen question until the PUT succeeds. |
+| Manual submit has a changed local answer | Frontend completes the normal PUT first and shows success only after both save and submission succeed. |
 | Offline through final expiry | Backend submits only answers it received; local-only data cannot be treated as submitted. |
 | Response is lost after a database commit | Client retries the same idempotency key and revision and receives the current saved state. |
 | User opens multiple tabs | Revisions determine the winner; conflicts cause the stale tab to reload server state. |

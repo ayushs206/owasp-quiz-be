@@ -16,7 +16,7 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 - Use managed services instead of maintaining custom infrastructure where practical.
 - Keep the API stateless so it can scale horizontally.
 - Protect accepted answers from loss during synchronized traffic spikes.
-- Support offline answer recovery and idempotent synchronization.
+- Preserve unsaved answers locally and retry them safely after connectivity returns.
 - Keep PostgreSQL as the authoritative source of quiz data.
 - Enforce quiz timing and authorization on the backend.
 - Persist answers and scores synchronously; calculate the leaderboard with a database query after quiz closure.
@@ -138,7 +138,7 @@ GET  /v1/attempts/:attemptId/questions/:displayOrder
 
 The backend returns one randomized question at a time with its options and saved answer. The frontend may prefetch only the next question. Responses use `Cache-Control: no-store` and never include correctness or marks. A displayed question can still be inspected in browser tools, but future questions and the answer key remain server-side.
 
-## Answer Saving and Offline Synchronization
+## Answer Saving and Local Recovery
 
 ```mermaid
 sequenceDiagram
@@ -150,18 +150,20 @@ sequenceDiagram
 
     Student->>Browser: Select answer
     Browser->>IndexedDB: Save pending mutation
-    Browser->>API: Send answer and client revision
+    Student->>Browser: Click Next, Previous, or Submit
+    Browser->>API: PUT latest answer and client revision
     API->>DB: Lock attempt and revision-aware upsert
     DB-->>API: Commit successful
     API-->>Browser: SAVED
     Browser->>IndexedDB: Remove confirmed mutation
+    Browser->>Browser: Display prefetched destination question
 ```
 
-The API acknowledges an answer only after PostgreSQL commits it. This keeps the durability guarantee simple: every answer reported as saved is already in the source-of-truth database.
+Selecting or changing an option writes only to IndexedDB and sends no network request. When the student clicks Next, Previous, or Submit, the frontend sends the latest changed answer and waits for PostgreSQL confirmation before displaying an unseen question or completing submission. Unanswered and unchanged questions create no write.
 
 Each answer request carries an idempotency key and a per-question client revision. Prisma handles validation and transactions; one small parameterized SQL helper performs `INSERT ... ON CONFLICT` and applies an update only when the incoming revision is newer. Requests use the database connection pool rather than opening a connection per student.
 
-The frontend keeps unsaved answers in IndexedDB. After reconnection it sends them through a bounded batch synchronization endpoint in their original sequence. Duplicate and out-of-order requests remain safe because of the unique constraint, idempotency key, and revision check.
+If saving fails, the frontend keeps the answer in IndexedDB, shows a retry state, and does not move to an unseen question. On reload or reconnection it restores the pending selection and retries the same PUT request. Duplicate and out-of-order retries remain safe because of the unique constraint, idempotency key, and revision check.
 
 ### Concurrent saves and query efficiency
 
@@ -170,7 +172,7 @@ The frontend keeps unsaved answers in IndexedDB. After reconnection it sends the
 - API replicas use small connection pools, while the Supabase pooler controls how many queries reach PostgreSQL concurrently.
 - Students update different attempt and answer rows, so synchronized saves do not create one shared row lock.
 - Question, option, answer, roster, and leaderboard data must be fetched with joins or bounded batch queries; database calls inside unbounded loops are not allowed.
-- Clicking Next changes the displayed question and does not send a second save when the selected answer is already saved or syncing.
+- Clicking Next or Previous sends one PUT only when the current answer changed; a successful save then allows navigation.
 
 ### Submission
 
@@ -222,7 +224,6 @@ All endpoints are versioned under `/v1` and use standardized RFC 7807 problem re
 | `GET` | `/v1/attempts/:attemptId` | Attempt state and server timing |
 | `GET` | `/v1/attempts/:attemptId/questions/:displayOrder` | Current question and randomized options |
 | `PUT` | `/v1/attempts/:attemptId/answers/:questionId` | Persist an answer revision |
-| `POST` | `/v1/attempts/:attemptId/answers/sync` | Synchronize an offline answer batch |
 | `POST` | `/v1/attempts/:attemptId/violations` | Record browser integrity events |
 | `POST` | `/v1/attempts/:attemptId/submit` | Persist final submission state |
 | `GET` | `/v1/attempts/:attemptId/result` | Read a published result |
@@ -290,7 +291,7 @@ The API creates one reusable `PrismaClient` with a deliberately small connection
 2. Add the project foundation, migrations, authentication, authorization, logging, and health checks.
 3. Build one end-to-end slice: roster, quiz, attempt, direct answer persistence, submission, and scoring.
 4. Run an early burst test and tune database indexes, queries, connection pools, and service replicas.
-5. Add administration, private media, offline synchronization, violations, results, and leaderboards.
+5. Add administration, private media, local answer recovery, violations, results, and leaderboards.
 6. Add expiry/finalization checks, logging, and operational runbooks.
 7. Complete integration, security, failure-recovery, and final load testing.
 
@@ -300,7 +301,7 @@ The principal load test models an exam rather than generic steady traffic:
 
 - Ramp to 10,000 authenticated students.
 - Create a synchronized attempt-start burst.
-- Generate concurrent answer-save spikes and offline reconnection batches.
+- Generate synchronized Next/save spikes and offline answer retries.
 - Submit 10,000 attempts during a short closing window.
 - Keep answer acceptance p95 below 300 ms under the agreed production test environment.
 - Keep the answer API error rate below 0.1%.

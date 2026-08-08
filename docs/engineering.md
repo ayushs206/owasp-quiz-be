@@ -196,7 +196,9 @@ Edge-case tests must include:
 - Admin enable/disable behavior and manual early closure.
 - A submitted student cannot create or resume a second attempt.
 - Multiple browser tabs and duplicate requests.
-- Offline batches containing valid, duplicate, stale, and invalid entries.
+- IndexedDB recovery after a failed save, reload, and reconnection.
+- Next/Previous navigation waits for a changed answer to save successfully.
+- Unanswered and unchanged questions produce no answer write.
 - Options that do not belong to the requested question.
 - Database timeouts where the client does not know whether a commit succeeded.
 - Future, delayed, duplicated, and malformed violation events.
@@ -204,7 +206,7 @@ Edge-case tests must include:
 
 ### Load tests
 
-Use k6 for synchronized start, answer, offline sync, and submission scenarios. Load tests are required before major quiz events, not on every pull request.
+Use k6 for synchronized start, Next/save, offline retry, and submission scenarios. Load tests are required before major quiz events, not on every pull request.
 
 ### Coverage
 

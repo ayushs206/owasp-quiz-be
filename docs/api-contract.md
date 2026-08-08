@@ -205,33 +205,14 @@ Response after database commit:
 
 Rules:
 
+- Selecting an option updates IndexedDB only; this endpoint is called when Next, Previous, or Submit needs to persist a changed answer.
+- Unanswered or unchanged questions do not call this endpoint.
 - `clientRevision` is a positive integer that increases per question.
 - A duplicate mutation with the same revision and content returns the current saved state.
 - The same revision with different content returns `409 REVISION_CONFLICT`.
 - A lower revision returns `409 STALE_ANSWER_REVISION` with the current revision.
 - Answers are rejected after expiry or submission.
 - Success means the answer is committed to PostgreSQL.
-
-### `POST /v1/attempts/:attemptId/answers/sync`
-
-Synchronizes up to 100 offline mutations.
-
-```json
-{
-  "answers": [
-    {
-      "questionId": "uuid",
-      "selectedOptionId": "uuid",
-      "clientRevision": 4,
-      "idempotencyKey": "uuid"
-    }
-  ]
-}
-```
-
-The response reports each item as `SAVED`, `DUPLICATE`, `STALE`, or `REJECTED`. The frontend removes only confirmed mutations from IndexedDB.
-
-The API locks the attempt once for a bounded batch, validates that it is still active, and then applies revision-aware upserts. It does not issue one ownership query per answer.
 
 ### `POST /v1/attempts/:attemptId/violations`
 
@@ -353,7 +334,6 @@ Exact limits are environment configuration, not hard-coded contract values.
 
 - General authenticated reads: per user.
 - Answer writes: per user and attempt, allowing normal rapid navigation.
-- Offline sync: lower request frequency with a larger bounded payload.
 - Violation events: per attempt with strict body-size limits.
 - Admin imports and publication: per admin.
 
@@ -385,13 +365,13 @@ Exact limits are environment configuration, not hard-coded contract values.
 | Attempt is disqualified | Return `403 ATTEMPT_DISQUALIFIED` instead of the normal score payload. |
 | Violation event is duplicated | Store/count it at most once and return the current warning count. |
 | Violation payload is malformed or too large | Reject it without increasing the qualifying count. |
-| Browser is offline while requesting an unseen question | Frontend keeps saved local answers but cannot load that question until connectivity returns. |
+| Browser is offline after changing an answer | Keep it in IndexedDB and block unseen-question navigation until the PUT succeeds. |
 
 ## Query-shape expectations
 
 - Quiz lists are paginated and include their availability in a bounded query plan.
 - One question request loads its snapshot, ordered options, and saved answer with one bounded query shape.
-- Batch answer sync locks the attempt once and performs set-based or bounded upserts.
+- One changed answer produces one locked, revision-aware upsert when navigation or submission occurs.
 - Admin counts use database aggregates rather than application-side loops.
 - Leaderboards use a set-based aggregate/window query.
 - API implementations must not execute Prisma calls inside loops over unbounded collections.
