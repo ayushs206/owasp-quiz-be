@@ -13,6 +13,7 @@ const validEnvironment: NodeJS.ProcessEnv = {
   SUPABASE_JWT_ISSUER: 'https://example.supabase.co/auth/v1',
   SUPABASE_JWT_AUDIENCE: 'authenticated',
   SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
+  SUPABASE_STORAGE_BUCKET: 'question-images',
   ALLOWED_EMAIL_DOMAINS: 'example.edu, students.example.edu',
   CORS_ORIGINS: 'http://localhost:3000',
 };
@@ -22,6 +23,7 @@ describe('loadEnv', () => {
     const env = loadEnv(validEnvironment);
 
     expect(env.PORT).toBe(3001);
+    expect(env.SUPABASE_STORAGE_BUCKET).toBe('question-images');
     expect(env.ALLOWED_EMAIL_DOMAINS).toEqual(['example.edu', 'students.example.edu']);
   });
 

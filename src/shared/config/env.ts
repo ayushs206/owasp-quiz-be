@@ -21,6 +21,7 @@ const envSchema = z.object({
   SUPABASE_JWT_ISSUER: z.url(),
   SUPABASE_JWT_AUDIENCE: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  SUPABASE_STORAGE_BUCKET: z.string().trim().min(1),
   ALLOWED_EMAIL_DOMAINS: commaSeparatedList,
   CORS_ORIGINS: commaSeparatedList,
 });
