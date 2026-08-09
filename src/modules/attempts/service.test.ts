@@ -97,19 +97,41 @@ describe('shuffleIds', () => {
     expect(shuffleIds(['only'], Math.random)).toEqual(['only']);
   });
 
-  it('produces a different order on different seeds', () => {
-    // With a large-enough array, two independent shuffles almost certainly differ.
+  it('produces a different order for different seeds (deterministic)', () => {
+    // Two LCG seeds that are known to produce different permutations for a
+    // 20-element array — fully deterministic, no Math.random involved.
+    function makeLcg(seed: number): () => number {
+      let s = seed;
+      return () => {
+        s = (s * 1664525 + 1013904223) & 0xffffffff;
+        return (s >>> 0) / 0x100000000;
+      };
+    }
+
     const ids = Array.from({ length: 20 }, (_, i) => `q${String(i)}`);
 
-    // Use Math.random for two independent calls; the chance of collision is
-    // negligible (1 / 20! ≈ 0).
-    const a = shuffleIds(ids, Math.random);
-    const b = shuffleIds(ids, Math.random);
+    const a = shuffleIds(ids, makeLcg(1));
+    const b = shuffleIds(ids, makeLcg(2));
 
-    // At least one position should differ. This is technically probabilistic
-    // but the probability of failure is astronomically small.
+    // Different seeds must produce at least one positional difference.
     const differs = a.some((id, i) => id !== b[i]);
     expect(differs).toBe(true);
+  });
+
+  it('throws RangeError when random() returns a value >= 1', () => {
+    expect(() => shuffleIds(['a', 'b', 'c'], () => 1)).toThrow(RangeError);
+  });
+
+  it('throws RangeError when random() returns a negative value', () => {
+    expect(() => shuffleIds(['a', 'b', 'c'], () => -0.5)).toThrow(RangeError);
+  });
+
+  it('throws RangeError when random() returns NaN', () => {
+    expect(() => shuffleIds(['a', 'b', 'c'], () => NaN)).toThrow(RangeError);
+  });
+
+  it('throws RangeError when random() returns Infinity', () => {
+    expect(() => shuffleIds(['a', 'b', 'c'], () => Infinity)).toThrow(RangeError);
   });
 });
 
@@ -279,6 +301,57 @@ describe('scoreAttempt — negative total score', () => {
 
     // score = +1 - 4 = -3
     expect(result.score).toBe(-3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// scoreAttempt — decimal marks (floating-point safety)
+// ---------------------------------------------------------------------------
+
+describe('scoreAttempt — decimal marks', () => {
+  it('scores correctly with 0.1 / 0.2 marks without floating-point drift', () => {
+    // 0.1 + 0.1 + 0.1 is 0.30000000000000004 in naive float arithmetic.
+    const snapshot = [q('q1', 0.1, 0.2), q('q2', 0.1, 0.2), q('q3', 0.1, 0.2)];
+    const answers = [correct('q1', 'o1'), correct('q2', 'o2'), correct('q3', 'o3')];
+
+    const result = scoreAttempt(snapshot, answers);
+
+    expect(result.score).toBe(0.3);
+    expect(result.maximumScore).toBe(0.3);
+  });
+
+  it('deducts decimal negative marks without floating-point drift', () => {
+    // 0.2 + 0.2 is exact, but mixing with 0.1 addition often drifts.
+    const snapshot = [q('q1', 0.5, 0.2), q('q2', 0.5, 0.2)];
+    const answers = [incorrect('q1', 'w1'), incorrect('q2', 'w2')];
+
+    const result = scoreAttempt(snapshot, answers);
+
+    // score = 0 - 0.2 - 0.2 = -0.4
+    expect(result.score).toBe(-0.4);
+    expect(result.maximumScore).toBe(1);
+  });
+
+  it('handles 1.25 positiveMark without floating-point drift', () => {
+    const snapshot = [q('q1', 1.25, 0.5), q('q2', 1.25, 0.5), q('q3', 1.25, 0.5)];
+    const answers = [correct('q1', 'o1'), correct('q2', 'o2'), correct('q3', 'o3')];
+
+    const result = scoreAttempt(snapshot, answers);
+
+    expect(result.score).toBe(3.75);
+    expect(result.maximumScore).toBe(3.75);
+  });
+
+  it('produces a negative decimal total when incorrect deductions exceed correct gains', () => {
+    // correct q1 → +0.5; incorrect q2 → -1.25; net = 0.5 - 1.25 = -0.75
+    const snapshot = [q('q1', 0.5, 0), q('q2', 1, 1.25)];
+    const answers = [correct('q1', 'o1'), incorrect('q2', 'w2')];
+
+    const result = scoreAttempt(snapshot, answers);
+
+    expect(result.score).toBe(-0.75);
+    expect(result.score).toBeLessThan(0);
+    expect(result.maximumScore).toBe(1.5);
   });
 });
 
