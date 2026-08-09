@@ -116,17 +116,97 @@ Sanyam: published quiz, questions, options, and enrollment
   `-- Param: attempt creation, snapshots, answer saving, and scoring
 ```
 
-Recommended merge order:
+### Required pull-request merge sequence
 
-1. Ayush: JWT verification and authenticated request context.
-2. Ayush: profile shell and onboarding.
-3. Sanyam: quiz-series and draft-quiz CRUD.
-4. Sanyam: questions, options, enrollment, publish, and enable.
-5. Param: pure scoring/randomization tests.
-6. Param: attempt start and question delivery.
-7. Param: answer save and submission.
-8. Param: violations, review, results, and leaderboard.
-9. Remaining admin summaries, exports, and hardening.
+Issues may be developed partly in parallel, but pull requests must merge in the following waves. Do not merge a later wave while one of its required dependencies is still open.
+
+| Wave | Pull requests to merge                                                                                                   | Can be developed in parallel?                                                              | Why this order keeps `main` stable                                                                                                                                                             |
+| ---- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | **A1 / #1** JWT middleware, then **P0 / #9** pure scoring and randomization                                              | Yes; merge A1 first, then P0                                                               | A1 establishes the only authenticated request context. P0 has no routes or database writes, so it cannot break incomplete feature flows.                                                       |
+| 2    | **A2 / #2** profile and onboarding                                                                                       | No dependency-free substitute                                                              | Every student route needs a trusted profile, account state, onboarding state, and roster identity. Merging this before student quiz/attempt routes prevents temporary authorization shortcuts. |
+| 3    | **A3 / #3** admin helpers, then **S1 / #4** quiz-series CRUD                                                             | S1 service/schema/tests may be prepared while A3 is reviewed                               | A3 creates one reusable source of admin authorization. S1 then becomes the first complete protected administration slice without duplicating role checks.                                      |
+| 4    | **S2 / #5** draft quiz/lifecycle, **S3 / #6** questions/storage, then **S4 / #7** enrollments                            | Develop sequentially within Sanyam's module; review may overlap                            | A usable attempt requires a valid series, quiz, questions/options, and enrollment. This wave makes all prerequisite exam content and eligibility available before attempt routes merge.        |
+| 5    | **P1 / #10** attempt start/question delivery                                                                             | No                                                                                         | P1 now has trusted students and complete published quiz data. `main` gains a usable read/start attempt slice without accepting answers yet.                                                    |
+| 6    | **P2 / #11** answer save/submission                                                                                      | No                                                                                         | This adds the shared lock-and-finalize service that later close and violation flows must reuse, preventing duplicate scoring implementations.                                                  |
+| 7    | **S6 / #12** quiz close and **P3 / #13** violations                                                                      | Yes after P2; merge either first                                                           | Both depend on P2's finalization service but affect separate modules. Each preserves the same locking and scoring behavior.                                                                    |
+| 8    | **P4 / #14** attempts/reviews/results/leaderboards and **S5 / #8** discovery/reporting                                   | Coordinate response/report dependencies; normally merge P4 before the final S5 export work | P4 establishes authoritative result publication and review behavior. S5 can then report/export final data without inventing duplicate result rules.                                            |
+| 9    | Hardening PRs: full integration tests, query-budget checks, security review, k6 scenarios, and operational documentation | Yes when files do not overlap                                                              | Features are complete, so hardening measures the integrated system instead of testing temporary implementations.                                                                               |
+
+Within a wave, “developed in parallel” does not mean “merge without rebasing.” The second PR merged in a wave must rebase onto the newly updated `main` and rerun all checks.
+
+### Merge gate for every pull request
+
+The maintainer should merge a PR only when all of these are true:
+
+1. Every issue listed as a dependency has already merged.
+2. The branch is rebased onto the latest `main`; GitHub reports no conflicts.
+3. CI passes on the rebased commit.
+4. At least one teammate reviewed the code; authentication, scoring, submission, migrations, and violations need especially careful review.
+5. The PR contains implementation and tests for one complete vertical slice, not disconnected placeholder files.
+6. Postman checks listed in the issue were run and recorded in the PR description.
+7. No temporary auth bypass, hard-coded user, public Storage bucket, debug endpoint, or secret is present.
+8. The merge leaves health endpoints and every previously merged endpoint working.
+
+Use **Squash and merge** for these task PRs unless preserving multiple commits has a specific review value. The squash commit should reference the issue, for example:
+
+```text
+feat(auth): verify Supabase JWTs and trusted identity (#1)
+```
+
+### Rebase checkpoint after each dependency merge
+
+When a dependency merges, every developer whose branch depends on it must update before continuing integration work:
+
+```powershell
+git switch main
+git pull --rebase origin main
+git switch <your-feature-branch>
+git rebase main
+pnpm install
+pnpm prisma:generate
+pnpm typecheck
+pnpm test
+```
+
+Resolve conflicts by preserving the already merged contract and shared helpers. Do not resolve a conflict by copying an old whole file over `main`. After resolving:
+
+```powershell
+git add <resolved-files>
+git rebase --continue
+git push --force-with-lease
+```
+
+Use `--force-with-lease` only on the developer's feature branch, never on `main`.
+
+### Shared-file coordination
+
+These files are integration hotspots and require explicit ownership per PR:
+
+| Shared file                           | Merge rule                                                                                                                                                                 |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/app.ts`                          | Only the PR currently registering its completed routes edits the route-registration section. Rebase later route PRs and add registrations without replacing existing ones. |
+| `src/lib/supabase.ts`                 | A1 creates the shared Supabase/JWKS foundation. S3 extends it for Storage after rebasing; it must not remove authentication exports.                                       |
+| `package.json` / `pnpm-lock.yaml`     | A1 adds `jose`; S3 may add `@supabase/supabase-js`. Always run `pnpm install` after rebasing and commit matching lockfile changes.                                         |
+| `docs/openapi.yaml`                   | The existing contract is authoritative. Change it only for a deliberate reconciled contract correction, not to make an implementation easier.                              |
+| `prisma/schema.prisma` and migrations | No assigned feature currently needs redesign. Any change requires maintainer approval and a reviewed migration.                                                            |
+| `src/modules/quizzes/*`               | Sanyam owns normal changes. Param exposes services rather than editing quiz internals. S6 is reviewed jointly.                                                             |
+| `src/modules/attempts/*`              | Param owns normal changes. Sanyam calls exported finalization behavior rather than mutating attempt tables directly.                                                       |
+
+### System state after each wave
+
+Each merge wave must leave a coherent, testable backend:
+
+1. **After Wave 1:** health remains operational; authentication middleware and pure domain logic are tested, but no fake feature endpoints are exposed.
+2. **After Wave 2:** a rostered Google user can resolve and complete a profile; unauthorized users remain blocked.
+3. **After Wave 3:** an authenticated admin can manage quiz-series containers using the shared role policy.
+4. **After Wave 4:** an admin can prepare a complete publishable quiz, private images, and eligible roster.
+5. **After Wave 5:** an eligible student can discover/start a quiz and retrieve one safe randomized question.
+6. **After Wave 6:** the student can save revision-safe answers and submit/score exactly once.
+7. **After Wave 7:** admin close and browser enforcement terminate attempts through the same authoritative finalization path.
+8. **After Wave 8:** admin review and publication control all student result, review, leaderboard, summary, and export visibility.
+9. **After Wave 9:** the complete backend is measured, secured, documented, and ready for staging acceptance.
+
+If a wave leaves a public route that always throws “not implemented,” bypasses authorization, or writes partial lifecycle state, do not merge it.
 
 The quiz-close endpoint is a cross-module integration point. Sanyam owns the quiz lifecycle transition, while Param owns attempt locking, finalization, and scoring. Do not merge a partial close implementation that changes the quiz state without finalizing active attempts. Complete `POST /v1/admin/quizzes/:quizId/close` in a small follow-up pull request after Param exports the shared finalization service.
 
