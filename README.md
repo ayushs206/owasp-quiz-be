@@ -4,20 +4,83 @@ Production-oriented backend architecture for the OWASP TIET Quiz Portal. The sys
 
 > Status: the strict TypeScript/Express foundation and initial PostgreSQL/Prisma database layer are implemented. Authentication and quiz feature slices remain to be built in the documented order.
 
-## Development
+## Developer Quick Start
 
-```text
+### Prerequisites
+
+- Git.
+- Node.js 22 or newer.
+- pnpm 11.20.0. Corepack may be used to install the pinned pnpm version.
+- Access to the team development Supabase project or an isolated PostgreSQL database.
+
+Before changing code, read the repository instructions and design documents in this order:
+
+1. `CLAUDE.md`
+2. `README.md`
+3. `docs/hld.md`
+4. `docs/database-design.md`
+5. `docs/api-contract.md`
+6. `docs/openapi.yaml`
+7. `docs/engineering.md`
+
+### Installation
+
+```powershell
+git clone https://github.com/PrathamRanka/owasp-quiz-be.git
+cd owasp-quiz-be
+corepack enable
 pnpm install
 Copy-Item .env.example .env
+```
+
+Ask a project maintainer for the development environment values through a secure channel and replace every placeholder in `.env`. Never commit `.env`, database passwords, Supabase secret/service-role keys, or production credentials.
+
+The database URLs must use:
+
+- `DATABASE_URL`: Supabase Transaction Pooler on port `6543`, with `pgbouncer=true&connection_limit=5` query parameters.
+- `DIRECT_URL`: Supabase Session Pooler on port `5432` for Prisma migrations when direct IPv6 connectivity is unavailable.
+
+### Database and Server
+
+```powershell
 pnpm prisma:migrate:deploy
 pnpm dev
 ```
 
-Replace the placeholders in `.env` before running migrations. New developers should use an isolated local or development database, never production. Contributors who intentionally change `prisma/schema.prisma` create the next reviewed migration with `pnpm prisma:migrate:dev --name <change>`.
+The API listens on `http://localhost:3001` by default. In another terminal, verify it with:
+
+```powershell
+curl.exe http://localhost:3001/health/live
+curl.exe http://localhost:3001/health/ready
+```
+
+Both endpoints should return HTTP `200`. Liveness returns `{"status":"ok"}` and readiness returns `{"status":"ready"}` after PostgreSQL connects successfully.
+
+New developers should use an isolated local or development database, never production. Contributors who intentionally change `prisma/schema.prisma` create a reviewed migration with:
+
+```powershell
+pnpm prisma:migrate:dev --name <change-name>
+```
+
+Do not use `prisma db push` against shared, staging, or production databases.
+
+### Required Checks
 
 The foundation includes environment validation, request IDs, structured logging, Helmet, strict CORS, rate limiting, RFC 7807 errors, Prisma Client, and `/health/live` and `/health/ready`. Readiness returns `200` only when PostgreSQL accepts a lightweight query.
 
-Run `pnpm prisma:validate`, `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:coverage`, and `pnpm build` before opening a pull request. CI runs the same checks, applies migrations to disposable PostgreSQL, and validates the OpenAPI contract.
+Run these commands before opening a pull request:
+
+```powershell
+pnpm prisma:validate
+pnpm format:check
+pnpm lint
+pnpm typecheck
+pnpm test:coverage
+pnpm test:integration
+pnpm build
+```
+
+Database integration tests are enabled by CI against disposable PostgreSQL. CI also applies committed migrations and validates the OpenAPI contract.
 
 ## Design Documentation
 
@@ -55,13 +118,13 @@ flowchart TD
 
 ### Managed services
 
-| Concern | Service |
-| --- | --- |
-| Frontend | Next.js on Vercel |
-| Backend API | Node.js, Express, and TypeScript on Railway |
-| Authentication | Google OAuth through Supabase Auth |
-| Primary database | Supabase PostgreSQL |
-| Question media | Private Supabase Storage buckets |
+| Concern          | Service                                     |
+| ---------------- | ------------------------------------------- |
+| Frontend         | Next.js on Vercel                           |
+| Backend API      | Node.js, Express, and TypeScript on Railway |
+| Authentication   | Google OAuth through Supabase Auth          |
+| Primary database | Supabase PostgreSQL                         |
+| Question media   | Private Supabase Storage buckets            |
 
 The Railway API and Supabase project should be placed in the closest available common region. Redis, BullMQ, and a separate worker service are intentionally excluded from version one.
 
@@ -126,19 +189,19 @@ Students must appear in an imported quiz roster and complete onboarding. A valid
 
 ## Core Data Model
 
-| Entity | Purpose |
-| --- | --- |
-| `quiz_series` | Admin-managed parent grouping for one or more independently scheduled quizzes |
-| `profiles` | Supabase identity, verified email, name, roll number, branch, phone, role, status, and onboarding completion |
-| `quizzes` | Quiz configuration, schedule, duration, admin availability toggle, lifecycle, and result publication |
-| `quiz_enrollments` | Imported roster entries and links to authenticated students |
-| `questions` | Question content, optional media path, marks, and negative marks |
-| `question_options` | Options, correctness, and source ordering |
-| `attempts` | Student attempt state, timing, submission, score totals, and review status |
-| `attempt_questions` | Immutable question and randomized option-order snapshot |
-| `answers` | Latest persisted selection and monotonic revision per question |
-| `violations` | Browser events, qualification decision, and warning sequence |
-| `attempt_reviews` | Append-only audit history for admin approval and disqualification decisions |
+| Entity              | Purpose                                                                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `quiz_series`       | Admin-managed parent grouping for one or more independently scheduled quizzes                                |
+| `profiles`          | Supabase identity, verified email, name, roll number, branch, phone, role, status, and onboarding completion |
+| `quizzes`           | Quiz configuration, schedule, duration, admin availability toggle, lifecycle, and result publication         |
+| `quiz_enrollments`  | Imported roster entries and links to authenticated students                                                  |
+| `questions`         | Question content, optional media path, marks, and negative marks                                             |
+| `question_options`  | Options, correctness, and source ordering                                                                    |
+| `attempts`          | Student attempt state, timing, submission, score totals, and review status                                   |
+| `attempt_questions` | Immutable question and randomized option-order snapshot                                                      |
+| `answers`           | Latest persisted selection and monotonic revision per question                                               |
+| `violations`        | Browser events, qualification decision, and warning sequence                                                 |
+| `attempt_reviews`   | Append-only audit history for admin approval and disqualification decisions                                  |
 
 Important constraints include:
 
@@ -241,22 +304,22 @@ All endpoints are versioned under `/v1` and use standardized RFC 7807 problem re
 
 ### Student API
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/v1/quiz-series` | Assigned quiz series |
-| `GET` | `/v1/quiz-series/:seriesId/quizzes` | Assigned quizzes inside a series |
-| `GET` | `/v1/me` | Current profile and role |
-| `POST` | `/v1/onboarding` | Complete the first-login student profile |
-| `GET` | `/v1/quizzes/:quizId` | Quiz instructions and availability |
-| `POST` | `/v1/quizzes/:quizId/attempts` | Start or resume the single attempt |
-| `GET` | `/v1/attempts/:attemptId` | Attempt state and server timing |
-| `GET` | `/v1/attempts/:attemptId/questions/:displayOrder` | Current question and randomized options |
-| `PUT` | `/v1/attempts/:attemptId/answers/:questionId` | Persist an answer revision |
-| `POST` | `/v1/attempts/:attemptId/violations` | Record browser integrity events |
-| `POST` | `/v1/attempts/:attemptId/submit` | Persist final submission state |
-| `GET` | `/v1/attempts/:attemptId/result` | Read a published result |
-| `GET` | `/v1/attempts/:attemptId/review` | Review answers after result publication |
-| `GET` | `/v1/quizzes/:quizId/leaderboard` | Read a published leaderboard |
+| Method | Endpoint                                          | Purpose                                  |
+| ------ | ------------------------------------------------- | ---------------------------------------- |
+| `GET`  | `/v1/quiz-series`                                 | Assigned quiz series                     |
+| `GET`  | `/v1/quiz-series/:seriesId/quizzes`               | Assigned quizzes inside a series         |
+| `GET`  | `/v1/me`                                          | Current profile and role                 |
+| `POST` | `/v1/onboarding`                                  | Complete the first-login student profile |
+| `GET`  | `/v1/quizzes/:quizId`                             | Quiz instructions and availability       |
+| `POST` | `/v1/quizzes/:quizId/attempts`                    | Start or resume the single attempt       |
+| `GET`  | `/v1/attempts/:attemptId`                         | Attempt state and server timing          |
+| `GET`  | `/v1/attempts/:attemptId/questions/:displayOrder` | Current question and randomized options  |
+| `PUT`  | `/v1/attempts/:attemptId/answers/:questionId`     | Persist an answer revision               |
+| `POST` | `/v1/attempts/:attemptId/violations`              | Record browser integrity events          |
+| `POST` | `/v1/attempts/:attemptId/submit`                  | Persist final submission state           |
+| `GET`  | `/v1/attempts/:attemptId/result`                  | Read a published result                  |
+| `GET`  | `/v1/attempts/:attemptId/review`                  | Review answers after result publication  |
+| `GET`  | `/v1/quizzes/:quizId/leaderboard`                 | Read a published leaderboard             |
 
 ### Admin API
 
