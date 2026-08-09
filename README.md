@@ -90,6 +90,7 @@ Database integration tests are enabled by CI against disposable PostgreSQL. CI a
 - [API contract](docs/api-contract.md)
 - [Machine-readable OpenAPI contract](docs/openapi.yaml)
 - [Engineering standards and CI/CD](docs/engineering.md)
+- [Three-developer task and Postman guide](docs/developer-tasks.md)
 
 ## Goals
 
