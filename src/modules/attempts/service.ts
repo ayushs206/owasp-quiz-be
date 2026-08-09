@@ -1,8 +1,6 @@
-
-
 /**
- * @param ids 
- * @param random 
+ * @param ids
+ * @param random
  */
 export function shuffleIds(ids: readonly string[], random: () => number): string[] {
   const result = ids.slice(); // copy — never mutate the source
@@ -16,14 +14,11 @@ export function shuffleIds(ids: readonly string[], random: () => number): string
   return result;
 }
 
-
-
 export interface AttemptQuestionSnapshot {
   questionId: string;
   positiveMark: number;
   negativeMark: number;
 }
-
 
 export interface PersistedAnswer {
   questionId: string;
@@ -39,7 +34,6 @@ export interface ScoreResult {
 
   unansweredCount: number;
 }
-
 
 /**
  * Calculate the score and answer counts for a submitted attempt.
