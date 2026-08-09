@@ -1,0 +1,292 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  STUDENT
+  ADMIN
+
+  @@map("user_role")
+}
+
+enum AccountStatus {
+  ACTIVE
+  BLOCKED
+
+  @@map("account_status")
+}
+
+enum QuizStatus {
+  DRAFT
+  PUBLISHED
+  CLOSED
+  RESULTS_PUBLISHED
+
+  @@map("quiz_status")
+}
+
+enum EnrollmentStatus {
+  ELIGIBLE
+  REVOKED
+
+  @@map("enrollment_status")
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+
+  @@map("attempt_status")
+}
+
+enum SubmissionReason {
+  USER
+  EXPIRED
+  VIOLATION
+  ADMIN
+
+  @@map("submission_reason")
+}
+
+enum ReviewStatus {
+  NOT_REQUIRED
+  PENDING
+  APPROVED
+  DISQUALIFIED
+
+  @@map("review_status")
+}
+
+model Profile {
+  id                 String        @id @db.Uuid
+  email              String        @db.Text
+  normalizedEmail    String        @unique(map: "profiles_normalized_email_key") @map("normalized_email") @db.Text
+  fullName           String?       @map("full_name") @db.Text
+  rollNumber         String?       @map("roll_number") @db.Text
+  branchCode         String?       @map("branch_code") @db.Text
+  phoneE164          String?       @map("phone_e164") @db.Text
+  role               UserRole      @default(STUDENT)
+  status             AccountStatus @default(ACTIVE)
+  profileCompletedAt DateTime?     @map("profile_completed_at") @db.Timestamptz(6)
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime      @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  createdQuizSeries QuizSeries[]     @relation("QuizSeriesCreator")
+  createdQuizzes    Quiz[]           @relation("QuizCreator")
+  enrollments       QuizEnrollment[]
+  attempts          Attempt[]
+  attemptReviews    AttemptReview[]  @relation("AttemptReviewer")
+
+  @@map("profiles")
+}
+
+model QuizSeries {
+  id          String   @id @default(uuid()) @db.Uuid
+  title       String   @db.Text
+  description String?  @db.Text
+  createdBy   String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  creator Profile @relation("QuizSeriesCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  quizzes Quiz[]
+
+  @@index([createdBy], map: "quiz_series_created_by_idx")
+  @@map("quiz_series")
+}
+
+model Quiz {
+  id                 String     @id @default(uuid()) @db.Uuid
+  seriesId           String     @map("series_id") @db.Uuid
+  title              String     @db.Text
+  description        String?    @db.Text
+  instructions       String?    @db.Text
+  durationMinutes    Int        @map("duration_minutes")
+  startsAt           DateTime   @map("starts_at") @db.Timestamptz(6)
+  endsAt             DateTime   @map("ends_at") @db.Timestamptz(6)
+  status             QuizStatus @default(DRAFT)
+  isEnabled          Boolean    @default(false) @map("is_enabled")
+  resultsPublishedAt DateTime?  @map("results_published_at") @db.Timestamptz(6)
+  createdBy          String     @map("created_by") @db.Uuid
+  createdAt          DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt          DateTime   @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  series      QuizSeries       @relation(fields: [seriesId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  creator     Profile          @relation("QuizCreator", fields: [createdBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  enrollments QuizEnrollment[]
+  questions   Question[]
+  attempts    Attempt[]
+
+  @@index([status, startsAt, endsAt], map: "quizzes_status_schedule_idx")
+  @@index([seriesId, startsAt], map: "quizzes_series_starts_at_idx")
+  @@index([createdBy], map: "quizzes_created_by_idx")
+  @@map("quizzes")
+}
+
+model QuizEnrollment {
+  id              String           @id @default(uuid()) @db.Uuid
+  quizId          String           @map("quiz_id") @db.Uuid
+  normalizedEmail String           @map("normalized_email") @db.Text
+  userId          String?          @map("user_id") @db.Uuid
+  rollNumber      String           @map("roll_number") @db.Text
+  branchCode      String           @map("branch_code") @db.Text
+  rosterName      String?          @map("roster_name") @db.Text
+  status          EnrollmentStatus @default(ELIGIBLE)
+  createdAt       DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  quiz Quiz     @relation(fields: [quizId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user Profile? @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([quizId, normalizedEmail], map: "quiz_enrollments_quiz_email_key")
+  @@unique([quizId, rollNumber], map: "quiz_enrollments_quiz_roll_key")
+  @@index([normalizedEmail, status], map: "quiz_enrollments_email_status_idx")
+  @@index([userId], map: "quiz_enrollments_user_id_idx")
+  @@map("quiz_enrollments")
+}
+
+model Question {
+  id            String   @id @default(uuid()) @db.Uuid
+  quizId        String   @map("quiz_id") @db.Uuid
+  prompt        String   @db.Text
+  imagePath     String?  @map("image_path") @db.Text
+  positiveMarks Decimal  @map("positive_marks") @db.Decimal(8, 2)
+  negativeMarks Decimal  @map("negative_marks") @db.Decimal(8, 2)
+  sourceOrder   Int      @map("source_order")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  quiz             Quiz              @relation(fields: [quizId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  options          QuestionOption[]
+  attemptQuestions AttemptQuestion[]
+
+  @@unique([quizId, sourceOrder], map: "questions_quiz_source_order_key")
+  @@map("questions")
+}
+
+model QuestionOption {
+  id          String   @id @default(uuid()) @db.Uuid
+  questionId  String   @map("question_id") @db.Uuid
+  text        String   @db.Text
+  isCorrect   Boolean  @map("is_correct")
+  sourceOrder Int      @map("source_order")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  question        Question @relation(fields: [questionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  selectedAnswers Answer[] @relation("SelectedOption")
+
+  @@unique([questionId, id], map: "question_options_question_id_id_key")
+  @@unique([questionId, sourceOrder], map: "question_options_question_source_order_key")
+  @@map("question_options")
+}
+
+model Attempt {
+  id                       String            @id @default(uuid()) @db.Uuid
+  quizId                   String            @map("quiz_id") @db.Uuid
+  userId                   String            @map("user_id") @db.Uuid
+  status                   AttemptStatus     @default(IN_PROGRESS)
+  startedAt                DateTime          @map("started_at") @db.Timestamptz(6)
+  expiresAt                DateTime          @map("expires_at") @db.Timestamptz(6)
+  submittedAt              DateTime?         @map("submitted_at") @db.Timestamptz(6)
+  submissionReason         SubmissionReason? @map("submission_reason")
+  qualifyingViolationCount Int               @default(0) @map("qualifying_violation_count")
+  reviewStatus             ReviewStatus      @default(NOT_REQUIRED) @map("review_status")
+  score                    Decimal?          @db.Decimal(10, 2)
+  maximumScore             Decimal?          @map("maximum_score") @db.Decimal(10, 2)
+  correctCount             Int?              @map("correct_count")
+  incorrectCount           Int?              @map("incorrect_count")
+  unansweredCount          Int?              @map("unanswered_count")
+  scoredAt                 DateTime?         @map("scored_at") @db.Timestamptz(6)
+  createdAt                DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  quiz             Quiz              @relation(fields: [quizId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  user             Profile           @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  attemptQuestions AttemptQuestion[]
+  answers          Answer[]
+  violations       Violation[]
+  reviews          AttemptReview[]
+
+  @@unique([quizId, userId], map: "attempts_quiz_user_key")
+  @@index([userId, status], map: "attempts_user_status_idx")
+  @@index([quizId, status], map: "attempts_quiz_status_idx")
+  @@index([status, expiresAt], map: "attempts_status_expires_at_idx")
+  @@map("attempts")
+}
+
+model AttemptQuestion {
+  attemptId     String  @map("attempt_id") @db.Uuid
+  questionId    String  @map("question_id") @db.Uuid
+  displayOrder  Int     @map("display_order")
+  optionOrder   Json    @map("option_order") @db.JsonB
+  positiveMarks Decimal @map("positive_marks") @db.Decimal(8, 2)
+  negativeMarks Decimal @map("negative_marks") @db.Decimal(8, 2)
+
+  attempt  Attempt  @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  answer   Answer?
+
+  @@id([attemptId, questionId], map: "attempt_questions_pkey")
+  @@unique([attemptId, displayOrder], map: "attempt_questions_attempt_display_order_key")
+  @@index([questionId], map: "attempt_questions_question_id_idx")
+  @@map("attempt_questions")
+}
+
+model Answer {
+  id                 String   @id @default(uuid()) @db.Uuid
+  attemptId          String   @map("attempt_id") @db.Uuid
+  questionId         String   @map("question_id") @db.Uuid
+  selectedOptionId   String?  @map("selected_option_id") @db.Uuid
+  clientRevision     BigInt   @map("client_revision")
+  lastIdempotencyKey String   @map("last_idempotency_key") @db.Uuid
+  answeredAt         DateTime @map("answered_at") @db.Timestamptz(6)
+  updatedAt          DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  attempt         Attempt         @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  attemptQuestion AttemptQuestion @relation(fields: [attemptId, questionId], references: [attemptId, questionId], onDelete: Restrict, onUpdate: Cascade)
+  selectedOption  QuestionOption? @relation("SelectedOption", fields: [questionId, selectedOptionId], references: [questionId, id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([attemptId, questionId], map: "answers_attempt_question_key")
+  @@index([questionId, selectedOptionId], map: "answers_question_selected_option_idx")
+  @@map("answers")
+}
+
+model Violation {
+  id               String   @id @default(uuid()) @db.Uuid
+  attemptId        String   @map("attempt_id") @db.Uuid
+  clientEventId    String   @map("client_event_id") @db.Uuid
+  type             String   @db.Text
+  clientOccurredAt DateTime @map("client_occurred_at") @db.Timestamptz(6)
+  receivedAt       DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
+  metadata         Json     @db.JsonB
+  qualifies        Boolean
+  sequenceNumber   Int?     @map("sequence_number")
+
+  attempt Attempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@unique([attemptId, clientEventId], map: "violations_attempt_event_key")
+  @@index([attemptId, receivedAt, id], map: "violations_attempt_received_id_idx")
+  @@map("violations")
+}
+
+model AttemptReview {
+  id         String       @id @default(uuid()) @db.Uuid
+  attemptId  String       @map("attempt_id") @db.Uuid
+  reviewedBy String       @map("reviewed_by") @db.Uuid
+  decision   ReviewStatus
+  note       String?      @db.Text
+  requestId  String       @map("request_id") @db.Uuid
+  createdAt  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  attempt  Attempt @relation(fields: [attemptId], references: [id], onDelete: Restrict, onUpdate: Cascade)
+  reviewer Profile @relation("AttemptReviewer", fields: [reviewedBy], references: [id], onDelete: Restrict, onUpdate: Cascade)
+
+  @@index([attemptId, createdAt, id], map: "attempt_reviews_attempt_created_id_idx")
+  @@index([reviewedBy], map: "attempt_reviews_reviewed_by_idx")
+  @@map("attempt_reviews")
+}
