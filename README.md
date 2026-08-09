@@ -189,19 +189,34 @@ Students must appear in an imported quiz roster and complete onboarding. A valid
 
 ## Core Data Model
 
-| Entity              | Purpose                                                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `quiz_series`       | Admin-managed parent grouping for one or more independently scheduled quizzes                                |
-| `profiles`          | Supabase identity, verified email, name, roll number, branch, phone, role, status, and onboarding completion |
-| `quizzes`           | Quiz configuration, schedule, duration, admin availability toggle, lifecycle, and result publication         |
-| `quiz_enrollments`  | Imported roster entries and links to authenticated students                                                  |
-| `questions`         | Question content, optional media path, marks, and negative marks                                             |
-| `question_options`  | Options, correctness, and source ordering                                                                    |
-| `attempts`          | Student attempt state, timing, submission, score totals, and review status                                   |
-| `attempt_questions` | Immutable question and randomized option-order snapshot                                                      |
-| `answers`           | Latest persisted selection and monotonic revision per question                                               |
-| `violations`        | Browser events, qualification decision, and warning sequence                                                 |
-| `attempt_reviews`   | Append-only audit history for admin approval and disqualification decisions                                  |
+```text
+Quiz Series
+`-- Quiz
+    |-- Quiz Enrollments
+    |-- Questions
+    |   `-- Question Options
+    `-- Attempts
+        |-- Attempt Questions
+        |-- Answers
+        |-- Violations
+        `-- Attempt Reviews
+```
+
+| Entity              | Purpose and reason for separation                                                                    |
+| ------------------- | ---------------------------------------------------------------------------------------------------- |
+| `quiz_series`       | Groups related quizzes without forcing them to share timing, roster, or lifecycle.                   |
+| `profiles`          | Holds Supabase identity, onboarding, role, and account state independently of any one quiz.          |
+| `quizzes`           | Represents one independently scheduled and published assessment.                                     |
+| `quiz_enrollments`  | Keeps per-quiz roster eligibility separate from authentication; login alone does not grant access.   |
+| `questions`         | Holds source quiz content and marks under the draft/published content lifecycle.                     |
+| `question_options`  | Holds repeating choices, ordering, and hidden correctness for each question.                         |
+| `attempts`          | Represents one student's authoritative timed session and final scoring state.                        |
+| `attempt_questions` | Freezes randomized question/option order and marks for one student's attempt.                        |
+| `answers`           | Stores revision-safe selections separately so retries, clearing, and out-of-order requests are safe. |
+| `violations`        | Preserves individual browser-integrity events and qualification evidence.                            |
+| `attempt_reviews`   | Preserves immutable admin review history while `attempts` stores the current review state.           |
+
+`profiles` connects across the tree: admins create series/quizzes and perform reviews, while students link to enrollments and own attempts. See [Database Design](docs/database-design.md) for the full ERD, field definitions, relationship meanings, and separation rationale.
 
 Important constraints include:
 

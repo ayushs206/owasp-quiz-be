@@ -39,21 +39,71 @@ Every Prisma migration and custom SQL migration must pass all five gates before 
 
 ### Key matrix
 
-| Table | Primary key | Composite/candidate keys |
-| --- | --- | --- |
-| `quiz_series` | `id` | None beyond the primary key |
-| `profiles` | `id` | Unique `normalized_email`; partial unique `roll_number` when present |
-| `quizzes` | `id` | None beyond the primary key |
-| `quiz_enrollments` | `id` | Unique `(quiz_id, normalized_email)`, `(quiz_id, roll_number)`, and partial `(quiz_id, user_id)` |
-| `questions` | `id` | Unique `(quiz_id, source_order)` |
-| `question_options` | `id` | Unique `(question_id, id)` for composite references and `(question_id, source_order)` |
-| `attempts` | `id` | Unique `(quiz_id, user_id)` |
-| `attempt_questions` | `(attempt_id, question_id)` | Unique `(attempt_id, display_order)` |
-| `answers` | `id` | Unique `(attempt_id, question_id)` |
-| `violations` | `id` | Unique `(attempt_id, client_event_id)` and partial `(attempt_id, sequence_number)` |
-| `attempt_reviews` | `id` | None beyond the primary key; append-only history |
+| Table               | Primary key                 | Composite/candidate keys                                                                         |
+| ------------------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
+| `quiz_series`       | `id`                        | None beyond the primary key                                                                      |
+| `profiles`          | `id`                        | Unique `normalized_email`; partial unique `roll_number` when present                             |
+| `quizzes`           | `id`                        | None beyond the primary key                                                                      |
+| `quiz_enrollments`  | `id`                        | Unique `(quiz_id, normalized_email)`, `(quiz_id, roll_number)`, and partial `(quiz_id, user_id)` |
+| `questions`         | `id`                        | Unique `(quiz_id, source_order)`                                                                 |
+| `question_options`  | `id`                        | Unique `(question_id, id)` for composite references and `(question_id, source_order)`            |
+| `attempts`          | `id`                        | Unique `(quiz_id, user_id)`                                                                      |
+| `attempt_questions` | `(attempt_id, question_id)` | Unique `(attempt_id, display_order)`                                                             |
+| `answers`           | `id`                        | Unique `(attempt_id, question_id)`                                                               |
+| `violations`        | `id`                        | Unique `(attempt_id, client_event_id)` and partial `(attempt_id, sequence_number)`               |
+| `attempt_reviews`   | `id`                        | None beyond the primary key; append-only history                                                 |
 
 ## Entity relationship overview
+
+The model can be read as this ownership tree:
+
+```text
+Quiz Series
+`-- Quiz
+    |-- Quiz Enrollments
+    |-- Questions
+    |   `-- Question Options
+    `-- Attempts
+        |-- Attempt Questions
+        |-- Answers
+        |-- Violations
+        `-- Attempt Reviews
+
+Profiles
+|-- create Quiz Series and Quizzes when the profile is an admin
+|-- link to Quiz Enrollments after a rostered student signs in
+|-- own Attempts when the profile is a student
+`-- perform Attempt Reviews when the profile is an admin
+```
+
+`profiles` is shown separately because identity participates in several branches rather than belonging to one quiz. Questions describe reusable published quiz content, while attempt questions freeze the student-specific exam snapshot. Answers, violations, and reviews are different records because they have different write rules, retention requirements, and authorization boundaries.
+
+### Entity responsibilities and separation reasons
+
+| Entity              | Responsibility                                                                                                        | Why it is separate                                                                                                                                 |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `quiz_series`       | Groups one or more related quizzes under an event or collection.                                                      | A series is organizational only; each child quiz keeps independent timing, roster, lifecycle, attempts, and results.                               |
+| `profiles`          | Stores the Supabase user identity, onboarding data, role, and account status.                                         | Authentication identity and application authorization must not be duplicated in every enrollment or attempt.                                       |
+| `quizzes`           | Stores one scheduled quiz's configuration, availability, lifecycle, and result-publication state.                     | Each quiz must open, close, enable, score, and publish independently even when it belongs to a series.                                             |
+| `quiz_enrollments`  | Stores the imported roster identity and eligibility for one student and one quiz.                                     | A valid login does not imply quiz access, and roster evidence must exist before and after the Google identity is linked.                           |
+| `questions`         | Stores the source prompt, private image path, marks, and authoring order for a quiz.                                  | Question content has a draft/published lifecycle distinct from student attempts and answers.                                                       |
+| `question_options`  | Stores the choices for a question and the hidden correct-option marker.                                               | Options repeat per question, require their own ordering and integrity constraints, and must remain hidden from student responses.                  |
+| `attempts`          | Stores one student's authoritative quiz session, timer, submission state, final score, and current review state.      | Attempt lifecycle and concurrency are per student and quiz; the unique quiz/user key prevents a second attempt.                                    |
+| `attempt_questions` | Freezes question order, option order, and marks for one attempt.                                                      | Randomization and scoring inputs must remain stable even if source content is later cloned or administrative data changes.                         |
+| `answers`           | Stores the latest accepted selection, client revision, idempotency key, and acceptance time for one attempt question. | Answers are mutable only through revision-safe writes and must support clearing, retries, and out-of-order requests independently of the snapshot. |
+| `violations`        | Stores deduplicated browser-integrity events and whether each event qualifies for enforcement.                        | Evidence is append-oriented, may contain multiple events per attempt, and has different validation and retention rules from answers.               |
+| `attempt_reviews`   | Stores immutable admin approval/disqualification decisions with actor, request, note, and timestamp.                  | The current review state on `attempts` is optimized for access checks, while this append-only table preserves the complete audit history.          |
+
+### Relationship meanings
+
+- One `quiz_series` contains many `quizzes`; a quiz belongs to exactly one series.
+- One `quiz` has many enrollments, questions, and attempts.
+- One `question` has many options and may appear in many attempt snapshots.
+- One `profile` may have many enrollments and attempts, but can have at most one attempt per quiz.
+- One `attempt` has many snapshotted questions, answers, violations, and review records.
+- One `attempt_question` identifies the only questions an attempt may answer.
+- One `answer` may select only an option belonging to its own question.
+- One admin `profile` may create quizzes and append many attempt-review decisions.
 
 ```mermaid
 erDiagram
@@ -188,47 +238,47 @@ erDiagram
 
 ## Enums
 
-| Enum | Values |
-| --- | --- |
-| `user_role` | `STUDENT`, `ADMIN` |
-| `account_status` | `ACTIVE`, `BLOCKED` |
-| `quiz_status` | `DRAFT`, `PUBLISHED`, `CLOSED`, `RESULTS_PUBLISHED` |
-| `enrollment_status` | `ELIGIBLE`, `REVOKED` |
-| `attempt_status` | `IN_PROGRESS`, `SUBMITTED` |
-| `submission_reason` | `USER`, `EXPIRED`, `VIOLATION`, `ADMIN` |
-| `review_status` | `NOT_REQUIRED`, `PENDING`, `APPROVED`, `DISQUALIFIED` |
+| Enum                | Values                                                |
+| ------------------- | ----------------------------------------------------- |
+| `user_role`         | `STUDENT`, `ADMIN`                                    |
+| `account_status`    | `ACTIVE`, `BLOCKED`                                   |
+| `quiz_status`       | `DRAFT`, `PUBLISHED`, `CLOSED`, `RESULTS_PUBLISHED`   |
+| `enrollment_status` | `ELIGIBLE`, `REVOKED`                                 |
+| `attempt_status`    | `IN_PROGRESS`, `SUBMITTED`                            |
+| `submission_reason` | `USER`, `EXPIRED`, `VIOLATION`, `ADMIN`               |
+| `review_status`     | `NOT_REQUIRED`, `PENDING`, `APPROVED`, `DISQUALIFIED` |
 
 ## Tables
 
 ### `quiz_series`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `title` | `text` | Required parent event/series name. |
-| `description` | `text` | Nullable. |
-| `created_by` | `uuid` | References the creating admin profile. |
-| `created_at` | `timestamptz` | Creation time. |
-| `updated_at` | `timestamptz` | Last update time. |
+| Column        | Type          | Notes                                  |
+| ------------- | ------------- | -------------------------------------- |
+| `id`          | `uuid`        | Primary key.                           |
+| `title`       | `text`        | Required parent event/series name.     |
+| `description` | `text`        | Nullable.                              |
+| `created_by`  | `uuid`        | References the creating admin profile. |
+| `created_at`  | `timestamptz` | Creation time.                         |
+| `updated_at`  | `timestamptz` | Last update time.                      |
 
 A series is an organizational container and does not replace child quiz timing. It may be deleted only when it contains no quizzes. Draft child quizzes must be deleted explicitly first; historical children keep the series retained.
 
 ### `profiles`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key; equals the Supabase authenticated user ID. |
-| `email` | `text` | Original authenticated email. |
-| `normalized_email` | `text` | Lowercase and trimmed; unique. |
-| `full_name` | `text` | Nullable until onboarding; then required. |
-| `roll_number` | `text` | Nullable until onboarding; unique and roster-validated. |
-| `branch_code` | `text` | Nullable until onboarding; roster-validated. |
-| `phone_e164` | `text` | Nullable until onboarding; then required and stored in E.164 format. |
-| `role` | `user_role` | Defaults to `STUDENT`. |
-| `status` | `account_status` | Defaults to `ACTIVE`. |
-| `profile_completed_at` | `timestamptz` | Nullable until the one-time onboarding transaction succeeds. |
-| `created_at` | `timestamptz` | Creation time. |
-| `updated_at` | `timestamptz` | Last update time. |
+| Column                 | Type             | Notes                                                                |
+| ---------------------- | ---------------- | -------------------------------------------------------------------- |
+| `id`                   | `uuid`           | Primary key; equals the Supabase authenticated user ID.              |
+| `email`                | `text`           | Original authenticated email.                                        |
+| `normalized_email`     | `text`           | Lowercase and trimmed; unique.                                       |
+| `full_name`            | `text`           | Nullable until onboarding; then required.                            |
+| `roll_number`          | `text`           | Nullable until onboarding; unique and roster-validated.              |
+| `branch_code`          | `text`           | Nullable until onboarding; roster-validated.                         |
+| `phone_e164`           | `text`           | Nullable until onboarding; then required and stored in E.164 format. |
+| `role`                 | `user_role`      | Defaults to `STUDENT`.                                               |
+| `status`               | `account_status` | Defaults to `ACTIVE`.                                                |
+| `profile_completed_at` | `timestamptz`    | Nullable until the one-time onboarding transaction succeeds.         |
+| `created_at`           | `timestamptz`    | Creation time.                                                       |
+| `updated_at`           | `timestamptz`    | Last update time.                                                    |
 
 The Supabase user ID from the verified JWT is the identity source. Email is copied from the verified Google identity and is not accepted from onboarding input. The application profile stores authorization and onboarding data but does not duplicate passwords, access tokens, refresh tokens, or sessions.
 
@@ -240,22 +290,22 @@ Checks:
 
 ### `quizzes`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `series_id` | `uuid` | Required reference to `quiz_series.id`. |
-| `title` | `text` | Required. |
-| `description` | `text` | Nullable. |
-| `instructions` | `text` | Nullable. |
-| `duration_minutes` | `integer` | Positive value. |
-| `starts_at` | `timestamptz` | Quiz access start. |
-| `ends_at` | `timestamptz` | Must be after `starts_at`. |
-| `status` | `quiz_status` | Defaults to `DRAFT`. |
-| `is_enabled` | `boolean` | Defaults to false; controls whether a published quiz accepts new attempts. |
-| `results_published_at` | `timestamptz` | Nullable. |
-| `created_by` | `uuid` | References `profiles.id`. |
-| `created_at` | `timestamptz` | Creation time. |
-| `updated_at` | `timestamptz` | Last update time. |
+| Column                 | Type          | Notes                                                                      |
+| ---------------------- | ------------- | -------------------------------------------------------------------------- |
+| `id`                   | `uuid`        | Primary key.                                                               |
+| `series_id`            | `uuid`        | Required reference to `quiz_series.id`.                                    |
+| `title`                | `text`        | Required.                                                                  |
+| `description`          | `text`        | Nullable.                                                                  |
+| `instructions`         | `text`        | Nullable.                                                                  |
+| `duration_minutes`     | `integer`     | Positive value.                                                            |
+| `starts_at`            | `timestamptz` | Quiz access start.                                                         |
+| `ends_at`              | `timestamptz` | Must be after `starts_at`.                                                 |
+| `status`               | `quiz_status` | Defaults to `DRAFT`.                                                       |
+| `is_enabled`           | `boolean`     | Defaults to false; controls whether a published quiz accepts new attempts. |
+| `results_published_at` | `timestamptz` | Nullable.                                                                  |
+| `created_by`           | `uuid`        | References `profiles.id`.                                                  |
+| `created_at`           | `timestamptz` | Creation time.                                                             |
+| `updated_at`           | `timestamptz` | Last update time.                                                          |
 
 Published quiz content is immutable. A changed quiz is created as a new draft or cloned version. `is_enabled` is an operational availability switch: disabling blocks new starts but does not change existing attempt expiry. Moving the quiz to `CLOSED` is the final action that ends active participation.
 
@@ -268,17 +318,17 @@ Checks:
 
 ### `quiz_enrollments`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `quiz_id` | `uuid` | References `quizzes.id`. |
-| `normalized_email` | `text` | Imported roster identity. |
-| `user_id` | `uuid` | Nullable reference to `profiles.id`; linked after login. |
-| `roll_number` | `text` | Required imported institutional roll number. |
-| `branch_code` | `text` | Required imported branch code. |
-| `roster_name` | `text` | Nullable imported student name for admin comparison. |
-| `status` | `enrollment_status` | Defaults to `ELIGIBLE`. |
-| `created_at` | `timestamptz` | Creation time. |
+| Column             | Type                | Notes                                                    |
+| ------------------ | ------------------- | -------------------------------------------------------- |
+| `id`               | `uuid`              | Primary key.                                             |
+| `quiz_id`          | `uuid`              | References `quizzes.id`.                                 |
+| `normalized_email` | `text`              | Imported roster identity.                                |
+| `user_id`          | `uuid`              | Nullable reference to `profiles.id`; linked after login. |
+| `roll_number`      | `text`              | Required imported institutional roll number.             |
+| `branch_code`      | `text`              | Required imported branch code.                           |
+| `roster_name`      | `text`              | Nullable imported student name for admin comparison.     |
+| `status`           | `enrollment_status` | Defaults to `ELIGIBLE`.                                  |
+| `created_at`       | `timestamptz`       | Creation time.                                           |
 
 Unique constraints:
 
@@ -292,17 +342,17 @@ Checks require a normalized, non-empty email, roll number, and branch code. A li
 
 ### `questions`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `quiz_id` | `uuid` | References `quizzes.id`. |
-| `prompt` | `text` | Required question text. |
-| `image_path` | `text` | Nullable private Supabase Storage path. |
-| `positive_marks` | `numeric(8,2)` | Must be non-negative. |
+| Column           | Type           | Notes                                                 |
+| ---------------- | -------------- | ----------------------------------------------------- |
+| `id`             | `uuid`         | Primary key.                                          |
+| `quiz_id`        | `uuid`         | References `quizzes.id`.                              |
+| `prompt`         | `text`         | Required question text.                               |
+| `image_path`     | `text`         | Nullable private Supabase Storage path.               |
+| `positive_marks` | `numeric(8,2)` | Must be non-negative.                                 |
 | `negative_marks` | `numeric(8,2)` | Must be non-negative; zero disables negative marking. |
-| `source_order` | `integer` | Admin ordering before randomization. |
-| `created_at` | `timestamptz` | Creation time. |
-| `updated_at` | `timestamptz` | Last update time. |
+| `source_order`   | `integer`      | Admin ordering before randomization.                  |
+| `created_at`     | `timestamptz`  | Creation time.                                        |
+| `updated_at`     | `timestamptz`  | Last update time.                                     |
 
 Constraints:
 
@@ -312,14 +362,14 @@ Constraints:
 
 ### `question_options`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `question_id` | `uuid` | References `questions.id`. |
-| `text` | `text` | Required unless an option image is supported later. |
-| `is_correct` | `boolean` | Hidden from student APIs. |
-| `source_order` | `integer` | Admin ordering before randomization. |
-| `created_at` | `timestamptz` | Creation time. |
+| Column         | Type          | Notes                                               |
+| -------------- | ------------- | --------------------------------------------------- |
+| `id`           | `uuid`        | Primary key.                                        |
+| `question_id`  | `uuid`        | References `questions.id`.                          |
+| `text`         | `text`        | Required unless an option image is supported later. |
+| `is_correct`   | `boolean`     | Hidden from student APIs.                           |
+| `source_order` | `integer`     | Admin ordering before randomization.                |
+| `created_at`   | `timestamptz` | Creation time.                                      |
 
 Constraints:
 
@@ -331,26 +381,26 @@ Constraints:
 
 ### `attempts`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `quiz_id` | `uuid` | References `quizzes.id`. |
-| `user_id` | `uuid` | References `profiles.id`. |
-| `status` | `attempt_status` | Defaults to `IN_PROGRESS`. |
-| `started_at` | `timestamptz` | Set by the backend. |
-| `expires_at` | `timestamptz` | Set by the backend. |
-| `submitted_at` | `timestamptz` | Nullable. |
-| `submission_reason` | `submission_reason` | Nullable until submission. |
-| `qualifying_violation_count` | `integer` | Defaults to zero. |
-| `review_status` | `review_status` | Defaults to `NOT_REQUIRED`. |
-| `score` | `numeric(10,2)` | Nullable until submission. |
-| `maximum_score` | `numeric(10,2)` | Nullable until submission. |
-| `correct_count` | `integer` | Nullable until submission. |
-| `incorrect_count` | `integer` | Nullable until submission. |
-| `unanswered_count` | `integer` | Nullable until submission. |
-| `scored_at` | `timestamptz` | Nullable until submission scoring completes. |
-| `created_at` | `timestamptz` | Creation time. |
-| `updated_at` | `timestamptz` | Last update time. |
+| Column                       | Type                | Notes                                        |
+| ---------------------------- | ------------------- | -------------------------------------------- |
+| `id`                         | `uuid`              | Primary key.                                 |
+| `quiz_id`                    | `uuid`              | References `quizzes.id`.                     |
+| `user_id`                    | `uuid`              | References `profiles.id`.                    |
+| `status`                     | `attempt_status`    | Defaults to `IN_PROGRESS`.                   |
+| `started_at`                 | `timestamptz`       | Set by the backend.                          |
+| `expires_at`                 | `timestamptz`       | Set by the backend.                          |
+| `submitted_at`               | `timestamptz`       | Nullable.                                    |
+| `submission_reason`          | `submission_reason` | Nullable until submission.                   |
+| `qualifying_violation_count` | `integer`           | Defaults to zero.                            |
+| `review_status`              | `review_status`     | Defaults to `NOT_REQUIRED`.                  |
+| `score`                      | `numeric(10,2)`     | Nullable until submission.                   |
+| `maximum_score`              | `numeric(10,2)`     | Nullable until submission.                   |
+| `correct_count`              | `integer`           | Nullable until submission.                   |
+| `incorrect_count`            | `integer`           | Nullable until submission.                   |
+| `unanswered_count`           | `integer`           | Nullable until submission.                   |
+| `scored_at`                  | `timestamptz`       | Nullable until submission scoring completes. |
+| `created_at`                 | `timestamptz`       | Creation time.                               |
+| `updated_at`                 | `timestamptz`       | Last update time.                            |
 
 Unique constraint: `(quiz_id, user_id)`.
 
@@ -363,14 +413,14 @@ Checks:
 
 ### `attempt_questions`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `attempt_id` | `uuid` | References `attempts.id`. |
-| `question_id` | `uuid` | References `questions.id`. |
-| `display_order` | `integer` | Randomized question position. |
-| `option_order` | `jsonb` | Ordered array of option UUIDs. |
-| `positive_marks` | `numeric(8,2)` | Snapshot at attempt creation. |
-| `negative_marks` | `numeric(8,2)` | Snapshot at attempt creation. |
+| Column           | Type           | Notes                          |
+| ---------------- | -------------- | ------------------------------ |
+| `attempt_id`     | `uuid`         | References `attempts.id`.      |
+| `question_id`    | `uuid`         | References `questions.id`.     |
+| `display_order`  | `integer`      | Randomized question position.  |
+| `option_order`   | `jsonb`        | Ordered array of option UUIDs. |
+| `positive_marks` | `numeric(8,2)` | Snapshot at attempt creation.  |
+| `negative_marks` | `numeric(8,2)` | Snapshot at attempt creation.  |
 
 Primary key: `(attempt_id, question_id)`. Display order is unique per attempt.
 
@@ -378,16 +428,16 @@ Checks require `display_order >= 1`, non-negative snapshotted marks, and a JSON 
 
 ### `answers`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `attempt_id` | `uuid` | References `attempts.id`. |
-| `question_id` | `uuid` | References `questions.id`. |
-| `selected_option_id` | `uuid` | Nullable reference to an option belonging to the same question; null records an explicit cleared-answer tombstone. |
-| `client_revision` | `bigint` | Monotonically increases per question. |
-| `last_idempotency_key` | `uuid` | Last accepted client mutation key. |
-| `answered_at` | `timestamptz` | Server acceptance time. |
-| `updated_at` | `timestamptz` | Last update time. |
+| Column                 | Type          | Notes                                                                                                              |
+| ---------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `id`                   | `uuid`        | Primary key.                                                                                                       |
+| `attempt_id`           | `uuid`        | References `attempts.id`.                                                                                          |
+| `question_id`          | `uuid`        | References `questions.id`.                                                                                         |
+| `selected_option_id`   | `uuid`        | Nullable reference to an option belonging to the same question; null records an explicit cleared-answer tombstone. |
+| `client_revision`      | `bigint`      | Monotonically increases per question.                                                                              |
+| `last_idempotency_key` | `uuid`        | Last accepted client mutation key.                                                                                 |
+| `answered_at`          | `timestamptz` | Server acceptance time.                                                                                            |
+| `updated_at`           | `timestamptz` | Last update time.                                                                                                  |
 
 Constraints:
 
@@ -401,17 +451,17 @@ A row with `selected_option_id = null` is not counted as answered during scoring
 
 ### `violations`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `attempt_id` | `uuid` | References `attempts.id`. |
-| `client_event_id` | `uuid` | Client-generated event ID; unique per attempt. |
-| `type` | `text` | Stable browser-event identifier. |
-| `client_occurred_at` | `timestamptz` | Client-reported event time. |
-| `received_at` | `timestamptz` | Server time. |
-| `metadata` | `jsonb` | Validated, size-limited metadata. |
-| `qualifies` | `boolean` | Whether this event counts toward enforcement. |
-| `sequence_number` | `integer` | Nullable warning/removal count. |
+| Column               | Type          | Notes                                          |
+| -------------------- | ------------- | ---------------------------------------------- |
+| `id`                 | `uuid`        | Primary key.                                   |
+| `attempt_id`         | `uuid`        | References `attempts.id`.                      |
+| `client_event_id`    | `uuid`        | Client-generated event ID; unique per attempt. |
+| `type`               | `text`        | Stable browser-event identifier.               |
+| `client_occurred_at` | `timestamptz` | Client-reported event time.                    |
+| `received_at`        | `timestamptz` | Server time.                                   |
+| `metadata`           | `jsonb`       | Validated, size-limited metadata.              |
+| `qualifies`          | `boolean`     | Whether this event counts toward enforcement.  |
+| `sequence_number`    | `integer`     | Nullable warning/removal count.                |
 
 Unique constraints: `(attempt_id, client_event_id)` and `(attempt_id, sequence_number)` when `sequence_number` is not null.
 
@@ -419,15 +469,15 @@ Checks require a non-empty event type, `sequence_number >= 1` when present, and 
 
 ### `attempt_reviews`
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` | Primary key. |
-| `attempt_id` | `uuid` | References `attempts.id`. |
-| `reviewed_by` | `uuid` | References the acting admin `profiles.id`. |
-| `decision` | `review_status` | Only `APPROVED` or `DISQUALIFIED`. |
-| `note` | `text` | Nullable bounded admin explanation. |
-| `request_id` | `uuid` | Request correlation identifier. |
-| `created_at` | `timestamptz` | Immutable server timestamp. |
+| Column        | Type            | Notes                                      |
+| ------------- | --------------- | ------------------------------------------ |
+| `id`          | `uuid`          | Primary key.                               |
+| `attempt_id`  | `uuid`          | References `attempts.id`.                  |
+| `reviewed_by` | `uuid`          | References the acting admin `profiles.id`. |
+| `decision`    | `review_status` | Only `APPROVED` or `DISQUALIFIED`.         |
+| `note`        | `text`          | Nullable bounded admin explanation.        |
+| `request_id`  | `uuid`          | Request correlation identifier.            |
+| `created_at`  | `timestamptz`   | Immutable server timestamp.                |
 
 Review rows are append-only. The current decision remains on `attempts.review_status` for efficient authorization, while this table is the authoritative audit history of who changed it and why.
 
