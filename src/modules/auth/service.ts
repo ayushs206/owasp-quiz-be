@@ -24,6 +24,19 @@ function isJwksNetworkFailure(error: unknown): boolean {
   return true;
 }
 
+function hasOAuthAuthenticationMethod(amr: unknown): boolean {
+  return (
+    Array.isArray(amr) &&
+    amr.some(
+      (entry) =>
+        entry === 'oauth' ||
+        (typeof entry === 'object' &&
+          entry !== null &&
+          (entry as Record<string, unknown>).method === 'oauth'),
+    )
+  );
+}
+
 export async function verifyAuthToken(
   token: string,
   env: Env,
@@ -107,7 +120,7 @@ export async function verifyAuthToken(
     });
   }
 
-  const isGoogle = appMetadata.provider === 'google';
+  const isGoogle = appMetadata.provider === 'google' && hasOAuthAuthenticationMethod(payload.amr);
 
   if (!isGoogle) {
     throw new ProblemError({
