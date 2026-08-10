@@ -9,7 +9,7 @@ import { createApp, type AppDependencies } from '../../app.js';
 import type { JwksFetcher } from '../../lib/supabase.js';
 import type { Env } from '../../shared/config/env.js';
 import type { ProblemBody } from '../../shared/errors/problem.js';
-import { completeOnboarding, getCurrentProfile } from './service.js';
+import { completeOnboarding, getCurrentProfile, type AdminListUsersResponse } from './service.js';
 
 type TestPrivateKey = Awaited<ReturnType<typeof generateKeyPair>>['privateKey'];
 
@@ -111,8 +111,8 @@ function createMockDb(
               rollNumber: update.rollNumber !== undefined ? update.rollNumber : target.rollNumber,
               branchCode: update.branchCode !== undefined ? update.branchCode : target.branchCode,
               phoneE164: update.phoneE164 !== undefined ? update.phoneE164 : target.phoneE164,
-              role: target.role,
-              status: target.status,
+              role: update.role !== undefined ? update.role : target.role,
+              status: update.status !== undefined ? update.status : target.status,
               profileCompletedAt:
                 update.profileCompletedAt !== undefined
                   ? update.profileCompletedAt
@@ -140,6 +140,46 @@ function createMockDb(
         };
         profiles.push(newProfile);
         return Promise.resolve(newProfile);
+      },
+      findMany({
+        take,
+        cursor,
+        skip,
+      }: {
+        take?: number;
+        cursor?: { id: string };
+        skip?: number;
+      } = {}): Promise<Profile[]> {
+        let result = [...profiles].sort((a, b) => a.id.localeCompare(b.id));
+        if (cursor) {
+          const idx = result.findIndex((p) => p.id === cursor.id);
+          if (idx >= 0) {
+            result = result.slice(idx + (skip ?? 0));
+          }
+        }
+        if (take !== undefined) {
+          result = result.slice(0, take);
+        }
+        return Promise.resolve(result);
+      },
+      update({ where, data }: { where: { id: string }; data: Partial<Profile> }): Promise<Profile> {
+        const index = profiles.findIndex((p) => p.id === where.id);
+        if (index < 0 || !profiles[index]) {
+          return Promise.reject(new Error('Record to update not found.'));
+        }
+        const target = profiles[index];
+        const updated: Profile = {
+          ...target,
+          fullName: data.fullName !== undefined ? data.fullName : target.fullName,
+          rollNumber: data.rollNumber !== undefined ? data.rollNumber : target.rollNumber,
+          branchCode: data.branchCode !== undefined ? data.branchCode : target.branchCode,
+          phoneE164: data.phoneE164 !== undefined ? data.phoneE164 : target.phoneE164,
+          role: data.role !== undefined ? data.role : target.role,
+          status: data.status !== undefined ? data.status : target.status,
+          updatedAt: new Date(),
+        };
+        profiles[index] = updated;
+        return Promise.resolve(updated);
       },
     },
     quizEnrollment: {
@@ -234,6 +274,20 @@ describe('Users Module: Service and Routes', () => {
       .setAudience(mockEnv.SUPABASE_JWT_AUDIENCE)
       .setExpirationTime('1h')
       .sign(privateKey);
+  }
+
+  function buildApp(customDb?: PrismaClient): Express {
+    const logger = pino({ level: 'silent' });
+    const deps: AppDependencies = {
+      env: mockEnv,
+      logger,
+      readinessCheck: async () => Promise.resolve({ ready: true }),
+      customJwks: jwksFetcher,
+    };
+    if (customDb) {
+      deps.customDb = customDb;
+    }
+    return createApp(deps);
   }
 
   describe('getCurrentProfile service', () => {
@@ -791,20 +845,6 @@ describe('Users Module: Service and Routes', () => {
   });
 
   describe('HTTP Endpoints (/v1/me and /v1/onboarding)', () => {
-    function buildApp(customDb?: PrismaClient): Express {
-      const logger = pino({ level: 'silent' });
-      const deps: AppDependencies = {
-        env: mockEnv,
-        logger,
-        readinessCheck: async () => Promise.resolve({ ready: true }),
-        customJwks: jwksFetcher,
-      };
-      if (customDb) {
-        deps.customDb = customDb;
-      }
-      return createApp(deps);
-    }
-
     it('GET /v1/me returns exact profile schema for eligible user', async () => {
       const mockDb = createMockDb({
         enrollments: [
@@ -919,6 +959,245 @@ describe('Users Module: Service and Routes', () => {
       expect(response.status).toBe(400);
       const body = response.body as ProblemBody;
       expect(body.code).toBe('VALIDATION_ERROR');
+    });
+  });
+
+  describe('Admin Users Endpoints & Authorization', () => {
+    const adminUserId = '11111111-1111-4111-a111-111111111111';
+    const studentUserId = '22222222-2222-4222-a222-222222222222';
+    const blockedAdminUserId = '33333333-3333-4333-a333-333333333333';
+
+    async function createTokenForUser(sub: string, email: string): Promise<string> {
+      return createToken({ sub, email });
+    }
+
+    function createAdminMockDb(): PrismaClient {
+      const now = new Date();
+      const adminProfile: Profile = {
+        id: adminUserId,
+        email: 'admin@thapar.edu',
+        normalizedEmail: 'admin@thapar.edu',
+        fullName: 'Admin User',
+        rollNumber: '999900001',
+        branchCode: 'CSE',
+        phoneE164: '+919999999999',
+        role: 'ADMIN',
+        status: 'ACTIVE',
+        profileCompletedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const studentProfile: Profile = {
+        id: studentUserId,
+        email: 'student@thapar.edu',
+        normalizedEmail: 'student@thapar.edu',
+        fullName: 'Student User',
+        rollNumber: '102300001',
+        branchCode: 'CSE',
+        phoneE164: '+919876543210',
+        role: 'STUDENT',
+        status: 'ACTIVE',
+        profileCompletedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const blockedAdminProfile: Profile = {
+        id: blockedAdminUserId,
+        email: 'blockedadmin@thapar.edu',
+        normalizedEmail: 'blockedadmin@thapar.edu',
+        fullName: 'Blocked Admin',
+        rollNumber: '999900002',
+        branchCode: 'CSE',
+        phoneE164: '+919999999998',
+        role: 'ADMIN',
+        status: 'BLOCKED',
+        profileCompletedAt: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      return createMockDb({
+        profiles: [adminProfile, studentProfile, blockedAdminProfile],
+      });
+    }
+
+    it('Student receives 403 on GET /v1/admin/users', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(studentUserId, 'student@thapar.edu');
+
+      const response = await supertest(app)
+        .get('/v1/admin/users')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(403);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('FORBIDDEN');
+    });
+
+    it('Student receives 403 on GET /v1/admin/users/:userId', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(studentUserId, 'student@thapar.edu');
+
+      const response = await supertest(app)
+        .get(`/v1/admin/users/${studentUserId}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(403);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('FORBIDDEN');
+    });
+
+    it('Student receives 403 on PATCH /v1/admin/users/:userId', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(studentUserId, 'student@thapar.edu');
+
+      const response = await supertest(app)
+        .patch(`/v1/admin/users/${studentUserId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ fullName: 'New Name' });
+
+      expect(response.status).toBe(403);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('FORBIDDEN');
+    });
+
+    it('Blocked admin is denied with 403 ACCOUNT_BLOCKED', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(blockedAdminUserId, 'blockedadmin@thapar.edu');
+
+      const response = await supertest(app)
+        .get('/v1/admin/users')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(403);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('ACCOUNT_BLOCKED');
+    });
+
+    it('Admin token listing users returns paginated data and nextCursor', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(adminUserId, 'admin@thapar.edu');
+
+      const response = await supertest(app)
+        .get('/v1/admin/users?limit=2')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toHaveProperty('data');
+      expect(response.body).toHaveProperty('nextCursor');
+      const body = response.body as AdminListUsersResponse;
+      expect(Array.isArray(body.data)).toBe(true);
+      expect(body.data.length).toBe(2);
+      expect(body.nextCursor).not.toBeNull();
+    });
+
+    it('Admin token getting user detail returns single profile', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(adminUserId, 'admin@thapar.edu');
+
+      const response = await supertest(app)
+        .get(`/v1/admin/users/${studentUserId}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        id: studentUserId,
+        email: 'student@thapar.edu',
+        fullName: 'Student User',
+        role: 'STUDENT',
+        status: 'ACTIVE',
+      });
+    });
+
+    it('Getting non-existent user returns scoped 404', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(adminUserId, 'admin@thapar.edu');
+      const nonExistentId = '00000000-0000-4000-a000-000000000000';
+
+      const response = await supertest(app)
+        .get(`/v1/admin/users/${nonExistentId}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(404);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('NOT_FOUND');
+    });
+
+    it('Valid correction via PATCH succeeds with 200', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(adminUserId, 'admin@thapar.edu');
+
+      const response = await supertest(app)
+        .patch(`/v1/admin/users/${studentUserId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          fullName: 'Updated Student Name',
+          branchCode: 'ECE',
+          role: 'ADMIN',
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        id: studentUserId,
+        fullName: 'Updated Student Name',
+        branchCode: 'ECE',
+        role: 'ADMIN',
+      });
+    });
+
+    it('Attempt to patch email field is rejected with 400', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(adminUserId, 'admin@thapar.edu');
+
+      const response = await supertest(app)
+        .patch(`/v1/admin/users/${studentUserId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ email: 'newemail@thapar.edu' });
+
+      expect(response.status).toBe(400);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('Attempt to patch id field is rejected with 400', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(adminUserId, 'admin@thapar.edu');
+
+      const response = await supertest(app)
+        .patch(`/v1/admin/users/${studentUserId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ id: '00000000-0000-4000-a000-000000000000' });
+
+      expect(response.status).toBe(400);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('Updating to duplicate roll number returns 409 conflict', async () => {
+      const mockDb = createAdminMockDb();
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(adminUserId, 'admin@thapar.edu');
+
+      const response = await supertest(app)
+        .patch(`/v1/admin/users/${studentUserId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ rollNumber: '999900001' }); // Admin's roll number
+
+      expect(response.status).toBe(409);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('ROLL_NUMBER_ALREADY_REGISTERED');
     });
   });
 });
