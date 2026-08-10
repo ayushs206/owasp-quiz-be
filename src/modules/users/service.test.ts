@@ -196,9 +196,10 @@ function createMockDb(
     async $transaction<T>(callback: (tx: PrismaClient) => Promise<T>): Promise<T> {
       return await callback(db as PrismaClient);
     },
-    $queryRaw(): Promise<never[]> {
-      // In unit tests, throw so the service falls back to findMany
-      return Promise.reject(new Error('$queryRaw not supported in mock'));
+    $queryRaw(_query: TemplateStringsArray, normalizedEmail: string): Promise<QuizEnrollment[]> {
+      return Promise.resolve(
+        enrollments.filter((e) => e.normalizedEmail === normalizedEmail && e.status === 'ELIGIBLE'),
+      );
     },
   };
 
@@ -224,6 +225,7 @@ describe('Users Module: Service and Routes', () => {
       email: 'student@thapar.edu',
       email_verified: true,
       app_metadata: { provider: 'google' },
+      amr: [{ method: 'oauth', timestamp: 1_723_000_000 }],
       ...claims,
     })
       .setProtectedHeader({ alg: 'RS256', kid: 'test-key-id' })

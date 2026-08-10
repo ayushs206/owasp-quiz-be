@@ -123,6 +123,16 @@ export async function getCurrentProfile(
       update: {},
     });
 
+    if (newProfile.normalizedEmail !== normalizedEmail) {
+      throw new ProblemError({
+        type: 'https://quiz.example/problems/account-not-registered',
+        title: 'Account not registered',
+        status: 403,
+        code: 'ACCOUNT_NOT_REGISTERED',
+        detail: 'The verified email does not match the registered user profile email.',
+      });
+    }
+
     if (newProfile.status === 'BLOCKED') {
       throw new ProblemError({
         type: 'https://quiz.example/problems/account-blocked',
@@ -231,22 +241,12 @@ export async function completeOnboarding(
         }
       }
 
-      let eligibleEnrollments: QuizEnrollment[];
-      try {
-        eligibleEnrollments = await tx.$queryRaw<QuizEnrollment[]>`
-          SELECT id, quiz_id as "quizId", normalized_email as "normalizedEmail", user_id as "userId", roll_number as "rollNumber", branch_code as "branchCode", roster_name as "rosterName", status, created_at as "createdAt"
-          FROM quiz_enrollments
-          WHERE normalized_email = ${normalizedEmail} AND status = 'ELIGIBLE'::"EnrollmentStatus"
-          FOR UPDATE
-        `;
-      } catch {
-        eligibleEnrollments = await tx.quizEnrollment.findMany({
-          where: {
-            normalizedEmail,
-            status: 'ELIGIBLE',
-          },
-        });
-      }
+      const eligibleEnrollments = await tx.$queryRaw<QuizEnrollment[]>`
+        SELECT id, quiz_id as "quizId", normalized_email as "normalizedEmail", user_id as "userId", roll_number as "rollNumber", branch_code as "branchCode", roster_name as "rosterName", status, created_at as "createdAt"
+        FROM quiz_enrollments
+        WHERE normalized_email = ${normalizedEmail} AND status = 'ELIGIBLE'
+        FOR UPDATE
+      `;
 
       if (eligibleEnrollments.length === 0) {
         throw new ProblemError({
@@ -256,6 +256,65 @@ export async function completeOnboarding(
           code: 'ACCOUNT_NOT_REGISTERED',
           detail: 'The user is not registered in any eligible quiz roster.',
         });
+      }
+
+      // The roster lock serializes onboarding for this verified email. Re-read
+      // identity state after acquiring it so a waiting request cannot overwrite
+      // a profile completed by the transaction that held the lock first.
+      const lockedProfileByEmail = await tx.profile.findUnique({
+        where: { normalizedEmail },
+      });
+      if (lockedProfileByEmail && lockedProfileByEmail.id !== userId) {
+        throw new ProblemError({
+          type: 'https://quiz.example/problems/account-not-registered',
+          title: 'Account not registered',
+          status: 403,
+          code: 'ACCOUNT_NOT_REGISTERED',
+          detail: 'The user is not registered in any eligible quiz roster.',
+        });
+      }
+
+      const lockedProfile = await tx.profile.findUnique({ where: { id: userId } });
+      if (lockedProfile) {
+        if (lockedProfile.normalizedEmail !== normalizedEmail) {
+          throw new ProblemError({
+            type: 'https://quiz.example/problems/account-not-registered',
+            title: 'Account not registered',
+            status: 403,
+            code: 'ACCOUNT_NOT_REGISTERED',
+            detail: 'The verified email does not match the registered user profile email.',
+          });
+        }
+
+        if (lockedProfile.status === 'BLOCKED') {
+          throw new ProblemError({
+            type: 'https://quiz.example/problems/account-blocked',
+            title: 'Account blocked',
+            status: 403,
+            code: 'ACCOUNT_BLOCKED',
+            detail: 'The user account has been blocked.',
+          });
+        }
+
+        if (lockedProfile.profileCompletedAt !== null) {
+          const isMatching =
+            lockedProfile.fullName === input.fullName &&
+            lockedProfile.rollNumber?.toLowerCase() === input.rollNumber.toLowerCase() &&
+            lockedProfile.branchCode?.toLowerCase() === input.branchCode.toLowerCase() &&
+            lockedProfile.phoneE164 === input.phoneNumber;
+
+          if (isMatching) {
+            return { profile: mapProfileResponse(lockedProfile), created: false };
+          }
+
+          throw new ProblemError({
+            type: 'https://quiz.example/problems/profile-already-completed',
+            title: 'Profile already completed',
+            status: 409,
+            code: 'CONFLICT',
+            detail: 'The profile has already been completed and cannot be modified via onboarding.',
+          });
+        }
       }
 
       const matchingRoster = eligibleEnrollments.find(
@@ -344,7 +403,17 @@ export async function completeOnboarding(
         },
       });
 
-      await tx.quizEnrollment.updateMany({
+      if (updatedProfile.normalizedEmail !== normalizedEmail) {
+        throw new ProblemError({
+          type: 'https://quiz.example/problems/account-not-registered',
+          title: 'Account not registered',
+          status: 403,
+          code: 'ACCOUNT_NOT_REGISTERED',
+          detail: 'The verified email does not match the registered user profile email.',
+        });
+      }
+
+      const linkedEnrollments = await tx.quizEnrollment.updateMany({
         where: {
           normalizedEmail,
           status: 'ELIGIBLE',
@@ -354,6 +423,16 @@ export async function completeOnboarding(
           userId,
         },
       });
+
+      if (linkedEnrollments.count !== eligibleEnrollments.length) {
+        throw new ProblemError({
+          type: 'https://quiz.example/problems/roster-details-mismatch',
+          title: 'Roster details mismatch',
+          status: 409,
+          code: 'ROSTER_DETAILS_MISMATCH',
+          detail: 'One or more roster records could not be linked safely.',
+        });
+      }
 
       return {
         profile: mapProfileResponse(updatedProfile),
