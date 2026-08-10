@@ -1,7 +1,11 @@
 import { PrismaClient } from '@prisma/client';
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { completeOnboarding, getCurrentProfile } from '../../src/modules/users/service.js';
+import {
+  adminUpdateUser,
+  completeOnboarding,
+  getCurrentProfile,
+} from '../../src/modules/users/service.js';
 import { ProblemError } from '../../src/shared/errors/problem.js';
 
 const prisma = new PrismaClient();
@@ -300,5 +304,51 @@ describeDatabase('PostgreSQL onboarding integration and concurrency', () => {
       where: { id: enrollment.id },
     });
     expect(unchanged.userId).toBe(ownerId);
+  });
+
+  it('preserves verified identity and emits a structured audit log for admin corrections', async () => {
+    const targetUserId = '11111111-1111-4111-8111-111111111111';
+    const requestId = '99999999-9999-4999-8999-999999999999';
+    await prisma.profile.create({
+      data: {
+        id: targetUserId,
+        email: 'student@thapar.edu',
+        normalizedEmail: 'student@thapar.edu',
+        fullName: 'Original Name',
+        rollNumber: '102300001',
+        branchCode: 'CSE',
+        phoneE164: '+919876543210',
+        role: 'STUDENT',
+        status: 'ACTIVE',
+        profileCompletedAt: new Date(),
+      },
+    });
+    const info = vi.fn();
+
+    const updated = await adminUpdateUser(
+      adminId,
+      targetUserId,
+      { fullName: 'Corrected Name', branchCode: 'ECE' },
+      requestId,
+      { info },
+      prisma,
+    );
+
+    expect(updated).toMatchObject({
+      id: targetUserId,
+      email: 'student@thapar.edu',
+      fullName: 'Corrected Name',
+      branchCode: 'ECE',
+    });
+    expect(info).toHaveBeenCalledWith(
+      {
+        actionType: 'ADMIN_UPDATE_USER',
+        actorId: adminId,
+        targetId: targetUserId,
+        requestId,
+        updatedFields: ['fullName', 'branchCode'],
+      },
+      'Privileged action: User profile updated by admin',
+    );
   });
 });

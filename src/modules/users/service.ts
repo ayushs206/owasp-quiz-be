@@ -471,3 +471,156 @@ export async function completeOnboarding(
     throw error;
   }
 }
+
+export interface AdminListUsersResponse {
+  data: ProfileResponse[];
+  nextCursor: string | null;
+}
+
+export async function adminListUsers(
+  query: { cursor?: string | undefined; limit: number },
+  db: PrismaClient = prisma,
+): Promise<AdminListUsersResponse> {
+  const take = query.limit + 1;
+  const profiles = await db.profile.findMany({
+    take,
+    ...(query.cursor
+      ? {
+          cursor: { id: query.cursor },
+          skip: 1,
+        }
+      : {}),
+    orderBy: { id: 'asc' },
+  });
+
+  let nextCursor: string | null = null;
+  if (profiles.length > query.limit) {
+    profiles.pop();
+    nextCursor = profiles.at(-1)?.id ?? null;
+  }
+
+  return {
+    data: profiles.map(mapProfileResponse),
+    nextCursor,
+  };
+}
+
+export async function adminGetUser(
+  userId: string,
+  db: PrismaClient = prisma,
+): Promise<ProfileResponse> {
+  const profile = await db.profile.findUnique({ where: { id: userId } });
+  if (!profile) {
+    throw new ProblemError({
+      type: 'https://quiz.example/problems/user-not-found',
+      title: 'User not found',
+      status: 404,
+      code: 'NOT_FOUND',
+      detail: 'The requested user profile was not found.',
+    });
+  }
+  return mapProfileResponse(profile);
+}
+
+export interface AuditLogger {
+  info(object: Record<string, unknown>, msg?: string): void;
+}
+
+export async function adminUpdateUser(
+  actorId: string,
+  targetUserId: string,
+  input: {
+    fullName?: string;
+    rollNumber?: string;
+    branchCode?: string;
+    phoneNumber?: string;
+    role?: 'STUDENT' | 'ADMIN';
+    status?: 'ACTIVE' | 'BLOCKED';
+  },
+  requestId: string | undefined,
+  logger: AuditLogger | undefined,
+  db: PrismaClient = prisma,
+): Promise<ProfileResponse> {
+  const existing = await db.profile.findUnique({ where: { id: targetUserId } });
+  if (!existing) {
+    throw new ProblemError({
+      type: 'https://quiz.example/problems/user-not-found',
+      title: 'User not found',
+      status: 404,
+      code: 'NOT_FOUND',
+      detail: 'The requested user profile was not found.',
+    });
+  }
+
+  if (input.rollNumber && input.rollNumber !== existing.rollNumber) {
+    const duplicate = await db.profile.findFirst({
+      where: {
+        rollNumber: input.rollNumber,
+        id: { not: targetUserId },
+        profileCompletedAt: { not: null },
+      },
+    });
+    if (duplicate) {
+      throw new ProblemError({
+        type: 'https://quiz.example/problems/roll-number-already-registered',
+        title: 'Roll number already registered',
+        status: 409,
+        code: 'ROLL_NUMBER_ALREADY_REGISTERED',
+        detail: 'The roll number is already registered to another user profile.',
+      });
+    }
+  }
+
+  const dataToUpdate: {
+    fullName?: string;
+    rollNumber?: string;
+    branchCode?: string;
+    phoneE164?: string;
+    role?: 'STUDENT' | 'ADMIN';
+    status?: 'ACTIVE' | 'BLOCKED';
+  } = {};
+
+  if (input.fullName !== undefined) dataToUpdate.fullName = input.fullName;
+  if (input.rollNumber !== undefined) dataToUpdate.rollNumber = input.rollNumber;
+  if (input.branchCode !== undefined) dataToUpdate.branchCode = input.branchCode;
+  if (input.phoneNumber !== undefined) dataToUpdate.phoneE164 = input.phoneNumber;
+  if (input.role !== undefined) dataToUpdate.role = input.role;
+  if (input.status !== undefined) dataToUpdate.status = input.status;
+
+  try {
+    const updated = await db.profile.update({
+      where: { id: targetUserId },
+      data: dataToUpdate,
+    });
+
+    if (logger) {
+      logger.info(
+        {
+          actionType: 'ADMIN_UPDATE_USER',
+          actorId,
+          targetId: targetUserId,
+          requestId: requestId ?? null,
+          updatedFields: Object.keys(input),
+        },
+        'Privileged action: User profile updated by admin',
+      );
+    }
+
+    return mapProfileResponse(updated);
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'P2002') {
+      const target = (error as { meta?: { target?: string[] | string } }).meta?.target;
+      const targetStr = Array.isArray(target) ? target.join(',') : (target ?? '');
+      if (targetStr.includes('roll_number') || targetStr.includes('rollNumber')) {
+        throw new ProblemError({
+          type: 'https://quiz.example/problems/roll-number-already-registered',
+          title: 'Roll number already registered',
+          status: 409,
+          code: 'ROLL_NUMBER_ALREADY_REGISTERED',
+          detail: 'The roll number is already registered to another user profile.',
+        });
+      }
+    }
+    throw error;
+  }
+}
