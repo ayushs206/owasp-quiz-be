@@ -169,21 +169,36 @@ function createMockDb(
         where,
         data,
       }: {
-        where: { normalizedEmail: string; status: EnrollmentStatus };
+        where: {
+          normalizedEmail: string;
+          status: EnrollmentStatus;
+          OR?: Array<{ userId: null } | { userId: string }>;
+        };
         data: { userId: string };
       }): Promise<{ count: number }> {
         let count = 0;
         for (const e of enrollments) {
-          if (e.normalizedEmail === where.normalizedEmail && e.status === where.status) {
-            e.userId = data.userId;
-            count++;
+          if (e.normalizedEmail !== where.normalizedEmail || e.status !== where.status) continue;
+          if (where.OR) {
+            const allowed = where.OR.some(
+              (cond) =>
+                ('userId' in cond && cond.userId === null && e.userId === null) ||
+                ('userId' in cond && cond.userId !== null && e.userId === cond.userId),
+            );
+            if (!allowed) continue;
           }
+          e.userId = data.userId;
+          count++;
         }
         return Promise.resolve({ count });
       },
     },
     async $transaction<T>(callback: (tx: PrismaClient) => Promise<T>): Promise<T> {
       return await callback(db as PrismaClient);
+    },
+    $queryRaw(): Promise<never[]> {
+      // In unit tests, throw so the service falls back to findMany
+      return Promise.reject(new Error('$queryRaw not supported in mock'));
     },
   };
 
@@ -331,6 +346,34 @@ describe('Users Module: Service and Routes', () => {
       });
     });
 
+    it('returns 403 ACCOUNT_NOT_REGISTERED when existing profile has a different normalizedEmail', async () => {
+      const mockDb = createMockDb({
+        profiles: [
+          {
+            id: '550e8400-e29b-41d4-a716-446655440000',
+            email: 'old@thapar.edu',
+            normalizedEmail: 'old@thapar.edu',
+            fullName: 'Old Student',
+            rollNumber: '102300001',
+            branchCode: 'CSE',
+            phoneE164: '+919876543210',
+            role: 'STUDENT',
+            status: 'ACTIVE',
+            profileCompletedAt: new Date(),
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ],
+      });
+
+      await expect(
+        getCurrentProfile('550e8400-e29b-41d4-a716-446655440000', 'new@thapar.edu', mockDb),
+      ).rejects.toMatchObject({
+        status: 403,
+        code: 'ACCOUNT_NOT_REGISTERED',
+      });
+    });
+
     it('returns 403 ACCOUNT_BLOCKED when account is blocked', async () => {
       const mockDb = createMockDb({
         profiles: [
@@ -401,6 +444,39 @@ describe('Users Module: Service and Routes', () => {
         onboardingStatus: 'COMPLETED',
       });
       expect(profile.profileCompletedAt).not.toBeNull();
+    });
+
+    it('saves trusted roster values for rollNumber and branchCode when input casing differs', async () => {
+      const mockDb = createMockDb({
+        enrollments: [
+          {
+            id: 'e-1',
+            quizId: 'q-1',
+            normalizedEmail: 'student@thapar.edu',
+            userId: null,
+            rollNumber: 'ABC102300001',
+            branchCode: 'COE',
+            rosterName: 'Student Name',
+            status: 'ELIGIBLE',
+            createdAt: new Date(),
+          },
+        ],
+      });
+
+      const { profile } = await completeOnboarding(
+        '550e8400-e29b-41d4-a716-446655440000',
+        'student@thapar.edu',
+        {
+          fullName: 'Student Name',
+          rollNumber: 'abc102300001',
+          branchCode: 'coe',
+          phoneNumber: '+919876543210',
+        },
+        mockDb,
+      );
+
+      expect(profile.rollNumber).toBe('ABC102300001');
+      expect(profile.branchCode).toBe('COE');
     });
 
     it('returns 409 ROSTER_DETAILS_MISMATCH for incorrect roll or branch', async () => {
@@ -563,6 +639,152 @@ describe('Users Module: Service and Routes', () => {
 
       expect(created).toBe(false);
       expect(profile.onboardingStatus).toBe('COMPLETED');
+    });
+
+    it('returns 403 ACCOUNT_NOT_REGISTERED when profile email does not match JWT email', async () => {
+      const mockDb = createMockDb({
+        profiles: [
+          {
+            id: '550e8400-e29b-41d4-a716-446655440000',
+            email: 'old@thapar.edu',
+            normalizedEmail: 'old@thapar.edu',
+            fullName: null,
+            rollNumber: null,
+            branchCode: null,
+            phoneE164: null,
+            role: 'STUDENT',
+            status: 'ACTIVE',
+            profileCompletedAt: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ],
+      });
+
+      await expect(
+        completeOnboarding(
+          '550e8400-e29b-41d4-a716-446655440000',
+          'new@thapar.edu',
+          {
+            fullName: 'Student Name',
+            rollNumber: '102300001',
+            branchCode: 'CSE',
+            phoneNumber: '+919876543210',
+          },
+          mockDb,
+        ),
+      ).rejects.toMatchObject({ status: 403, code: 'ACCOUNT_NOT_REGISTERED' });
+    });
+
+    it('returns 403 ACCOUNT_NOT_REGISTERED when normalizedEmail is already owned by a different profile ID', async () => {
+      const mockDb = createMockDb({
+        profiles: [
+          {
+            id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            email: 'student@thapar.edu',
+            normalizedEmail: 'student@thapar.edu',
+            fullName: 'Other Student',
+            rollNumber: '102300002',
+            branchCode: 'CSE',
+            phoneE164: '+919876543211',
+            role: 'STUDENT',
+            status: 'ACTIVE',
+            profileCompletedAt: new Date(),
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ],
+      });
+
+      await expect(
+        completeOnboarding(
+          '550e8400-e29b-41d4-a716-446655440000',
+          'student@thapar.edu',
+          {
+            fullName: 'Student Name',
+            rollNumber: '102300001',
+            branchCode: 'CSE',
+            phoneNumber: '+919876543210',
+          },
+          mockDb,
+        ),
+      ).rejects.toMatchObject({ status: 403, code: 'ACCOUNT_NOT_REGISTERED' });
+    });
+
+    it('returns 409 ROSTER_DETAILS_MISMATCH when one enrollment is already linked to a different user', async () => {
+      const otherUserId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+      const mockDb = createMockDb({
+        enrollments: [
+          {
+            id: 'e-1',
+            quizId: 'q-1',
+            normalizedEmail: 'student@thapar.edu',
+            userId: otherUserId,
+            rollNumber: '102300001',
+            branchCode: 'CSE',
+            rosterName: 'Student Name',
+            status: 'ELIGIBLE',
+            createdAt: new Date(),
+          },
+        ],
+      });
+
+      await expect(
+        completeOnboarding(
+          '550e8400-e29b-41d4-a716-446655440000',
+          'student@thapar.edu',
+          {
+            fullName: 'Student Name',
+            rollNumber: '102300001',
+            branchCode: 'CSE',
+            phoneNumber: '+919876543210',
+          },
+          mockDb,
+        ),
+      ).rejects.toMatchObject({ status: 409, code: 'ROSTER_DETAILS_MISMATCH' });
+    });
+
+    it('returns 409 ROSTER_DETAILS_MISMATCH when conflicting roster rows exist for one email', async () => {
+      const mockDb = createMockDb({
+        enrollments: [
+          {
+            id: 'e-1',
+            quizId: 'q-1',
+            normalizedEmail: 'student@thapar.edu',
+            userId: null,
+            rollNumber: '102300001',
+            branchCode: 'CSE',
+            rosterName: 'Student Name',
+            status: 'ELIGIBLE',
+            createdAt: new Date(),
+          },
+          {
+            id: 'e-2',
+            quizId: 'q-2',
+            normalizedEmail: 'student@thapar.edu',
+            userId: null,
+            rollNumber: '102300099', // Different roll — conflicting
+            branchCode: 'CSE',
+            rosterName: 'Student Name',
+            status: 'ELIGIBLE',
+            createdAt: new Date(),
+          },
+        ],
+      });
+
+      await expect(
+        completeOnboarding(
+          '550e8400-e29b-41d4-a716-446655440000',
+          'student@thapar.edu',
+          {
+            fullName: 'Student Name',
+            rollNumber: '102300001',
+            branchCode: 'CSE',
+            phoneNumber: '+919876543210',
+          },
+          mockDb,
+        ),
+      ).rejects.toMatchObject({ status: 409, code: 'ROSTER_DETAILS_MISMATCH' });
     });
   });
 
