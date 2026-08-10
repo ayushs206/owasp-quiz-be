@@ -1,7 +1,8 @@
-import type { PrismaClient, Profile, QuizEnrollment } from '@prisma/client';
+import type { PrismaClient, Profile } from '@prisma/client';
 
 import { prisma } from '../../lib/prisma.js';
 import { ProblemError } from '../../shared/errors/problem.js';
+import { lockEligibleEnrollments } from './queries.js';
 import type { OnboardingInput } from './schema.js';
 
 export interface ProfileResponse {
@@ -241,12 +242,7 @@ export async function completeOnboarding(
         }
       }
 
-      const eligibleEnrollments = await tx.$queryRaw<QuizEnrollment[]>`
-        SELECT id, quiz_id as "quizId", normalized_email as "normalizedEmail", user_id as "userId", roll_number as "rollNumber", branch_code as "branchCode", roster_name as "rosterName", status, created_at as "createdAt"
-        FROM quiz_enrollments
-        WHERE normalized_email = ${normalizedEmail} AND status = 'ELIGIBLE'
-        FOR UPDATE
-      `;
+      const eligibleEnrollments = await lockEligibleEnrollments(tx, normalizedEmail);
 
       if (eligibleEnrollments.length === 0) {
         throw new ProblemError({
