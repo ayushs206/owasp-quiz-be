@@ -28,17 +28,8 @@ export function createAuthMiddleware(env: Env, customJwks?: JwksFetcher): Reques
         });
       }
 
-      if (!authHeader.startsWith('Bearer ')) {
-        throw new ProblemError({
-          type: 'https://quiz.example/problems/unauthorized',
-          title: 'Unauthorized',
-          status: 401,
-          code: 'UNAUTHORIZED',
-          detail: 'Missing or malformed authorization header.',
-        });
-      }
-
-      const token = authHeader.slice(7).trim();
+      const match = authHeader.match(/^Bearer\s+(.+)$/i);
+      const token = match?.[1]?.trim();
       if (!token) {
         throw new ProblemError({
           type: 'https://quiz.example/problems/unauthorized',

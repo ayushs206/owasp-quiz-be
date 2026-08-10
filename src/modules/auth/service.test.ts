@@ -1,5 +1,5 @@
 import express from 'express';
-import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from 'jose';
+import { createLocalJWKSet, errors, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import pino from 'pino';
 import supertest from 'supertest';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -84,13 +84,14 @@ describe('Auth Service and Middleware', () => {
       });
     });
 
-    it('supports provider from app_metadata.providers array', async () => {
+    it('rejects provider: email even if providers array includes google', async () => {
       const token = await createToken({
-        app_metadata: { providers: ['google', 'email'] },
+        app_metadata: { provider: 'email', providers: ['email', 'google'] },
       });
-      const identity = await verifyAuthToken(token, mockEnv, jwksFetcher);
-
-      expect(identity.email).toBe('student@thapar.edu');
+      await expect(verifyAuthToken(token, mockEnv, jwksFetcher)).rejects.toMatchObject({
+        status: 401,
+        code: 'UNAUTHORIZED',
+      });
     });
 
     it('rejects an empty or non-string token with 401', async () => {
@@ -140,6 +141,14 @@ describe('Auth Service and Middleware', () => {
       });
     });
 
+    it('rejects non-UUID subject with 401', async () => {
+      const token = await createToken({ sub: 'invalid-subject-uuid' });
+      await expect(verifyAuthToken(token, mockEnv, jwksFetcher)).rejects.toMatchObject({
+        status: 401,
+        code: 'UNAUTHORIZED',
+      });
+    });
+
     it('rejects missing email with 401', async () => {
       const token = await createToken({ email: '' });
       await expect(verifyAuthToken(token, mockEnv, jwksFetcher)).rejects.toMatchObject({
@@ -150,6 +159,18 @@ describe('Auth Service and Middleware', () => {
 
     it('rejects unverified email with 401', async () => {
       const token = await createToken({ email_verified: false });
+      await expect(verifyAuthToken(token, mockEnv, jwksFetcher)).rejects.toMatchObject({
+        status: 401,
+        code: 'UNAUTHORIZED',
+      });
+    });
+
+    it('rejects token where only user_metadata.email_verified is true', async () => {
+      const token = await createToken({
+        email_verified: false,
+        app_metadata: { provider: 'google', email_verified: false },
+        user_metadata: { email_verified: true },
+      });
       await expect(verifyAuthToken(token, mockEnv, jwksFetcher)).rejects.toMatchObject({
         status: 401,
         code: 'UNAUTHORIZED',
@@ -174,14 +195,18 @@ describe('Auth Service and Middleware', () => {
   });
 
   describe('createAuthMiddleware Integration', () => {
-    function buildTestApp(): express.Express {
+    function buildTestApp(customJwks?: JwksFetcher): express.Express {
       const logger = pino({ level: 'silent' });
       const app = express();
 
       app.use(requestId);
-      app.get('/protected-test', createAuthMiddleware(mockEnv, jwksFetcher), (req, res) => {
-        res.status(200).json({ user: req.user });
-      });
+      app.get(
+        '/protected-test',
+        createAuthMiddleware(mockEnv, customJwks ?? jwksFetcher),
+        (req, res) => {
+          res.status(200).json({ user: req.user });
+        },
+      );
       app.use(createErrorHandler(logger));
 
       return app;
@@ -253,6 +278,53 @@ describe('Auth Service and Middleware', () => {
           sub: '550e8400-e29b-41d4-a716-446655440000',
           email: 'student@thapar.edu',
         },
+      });
+    });
+
+    it('accepts case-insensitive bearer scheme in Authorization header', async () => {
+      const app = buildTestApp();
+      const token = await createToken({ email: 'student@thapar.edu' });
+      const response = await supertest(app)
+        .get('/protected-test')
+        .set('Authorization', `bearer ${token}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual({
+        user: {
+          sub: '550e8400-e29b-41d4-a716-446655440000',
+          email: 'student@thapar.edu',
+        },
+      });
+    });
+
+    it('returns 503 problem error when JWKS dependency encounters a network failure', async () => {
+      const failingJwks: JwksFetcher = () => {
+        throw new Error('JWKS endpoint network timeout');
+      };
+      const app = buildTestApp(failingJwks);
+      const token = await createToken({ email: 'student@thapar.edu' });
+
+      const response = await supertest(app)
+        .get('/protected-test')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(503);
+      expect(response.body).toMatchObject({
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+        title: 'Service unavailable',
+      });
+    });
+
+    it('returns 503 problem error when JWKS throws JWKSTimeout error', async () => {
+      const timeoutJwks: JwksFetcher = () => {
+        throw new errors.JWKSTimeout();
+      };
+      const token = await createToken({ email: 'student@thapar.edu' });
+
+      await expect(verifyAuthToken(token, mockEnv, timeoutJwks)).rejects.toMatchObject({
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
       });
     });
   });

@@ -1,4 +1,5 @@
-import { jwtVerify, type JWTPayload } from 'jose';
+import { errors, jwtVerify, type JWTPayload } from 'jose';
+import { z } from 'zod';
 
 import { getSupabaseJwks, type JwksFetcher } from '../../lib/supabase.js';
 import type { Env } from '../../shared/config/env.js';
@@ -7,6 +8,20 @@ import { ProblemError } from '../../shared/errors/problem.js';
 export interface AuthenticatedIdentity {
   sub: string;
   email: string;
+}
+
+function isJwksNetworkFailure(error: unknown): boolean {
+  if (error instanceof errors.JWKSTimeout || error instanceof errors.JWKSInvalid) {
+    return true;
+  }
+  if (error instanceof errors.JOSEError) {
+    return (
+      error.code === 'ERR_JOSE_GENERIC' ||
+      error.code === 'ERR_JWKS_TIMEOUT' ||
+      error.code === 'ERR_JWKS_INVALID'
+    );
+  }
+  return true;
 }
 
 export async function verifyAuthToken(
@@ -33,7 +48,17 @@ export async function verifyAuthToken(
       audience: env.SUPABASE_JWT_AUDIENCE,
     });
     payload = result.payload;
-  } catch {
+  } catch (error) {
+    if (isJwksNetworkFailure(error)) {
+      throw new ProblemError({
+        type: 'https://quiz.example/problems/service-unavailable',
+        title: 'Service unavailable',
+        status: 503,
+        code: 'SERVICE_UNAVAILABLE',
+        detail: 'Authentication dependency is temporarily unavailable.',
+      });
+    }
+
     throw new ProblemError({
       type: 'https://quiz.example/problems/unauthorized',
       title: 'Unauthorized',
@@ -43,7 +68,8 @@ export async function verifyAuthToken(
     });
   }
 
-  if (!payload.sub || typeof payload.sub !== 'string' || payload.sub.trim() === '') {
+  const subResult = z.string().uuid().safeParse(payload.sub);
+  if (!subResult.success) {
     throw new ProblemError({
       type: 'https://quiz.example/problems/unauthorized',
       title: 'Unauthorized',
@@ -52,6 +78,7 @@ export async function verifyAuthToken(
       detail: 'Missing or invalid authentication token.',
     });
   }
+  const sub = subResult.data;
 
   if (!payload.email || typeof payload.email !== 'string' || payload.email.trim() === '') {
     throw new ProblemError({
@@ -67,15 +94,8 @@ export async function verifyAuthToken(
     typeof payload.app_metadata === 'object' && payload.app_metadata !== null
       ? (payload.app_metadata as Record<string, unknown>)
       : {};
-  const userMetadata =
-    typeof payload.user_metadata === 'object' && payload.user_metadata !== null
-      ? (payload.user_metadata as Record<string, unknown>)
-      : {};
 
-  const isEmailVerified =
-    payload.email_verified === true ||
-    appMetadata.email_verified === true ||
-    userMetadata.email_verified === true;
+  const isEmailVerified = payload.email_verified === true || appMetadata.email_verified === true;
 
   if (!isEmailVerified) {
     throw new ProblemError({
@@ -87,9 +107,7 @@ export async function verifyAuthToken(
     });
   }
 
-  const provider = appMetadata.provider;
-  const providers = Array.isArray(appMetadata.providers) ? appMetadata.providers : [];
-  const isGoogle = provider === 'google' || providers.includes('google');
+  const isGoogle = appMetadata.provider === 'google';
 
   if (!isGoogle) {
     throw new ProblemError({
@@ -117,7 +135,7 @@ export async function verifyAuthToken(
   }
 
   return {
-    sub: payload.sub,
+    sub,
     email: normalizedEmail,
   };
 }
