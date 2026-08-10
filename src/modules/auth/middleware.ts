@@ -96,6 +96,16 @@ export function requireAdminRole(req: Request, _res: Response, next: NextFunctio
       });
     }
 
+    if (req.profile.onboardingStatus !== 'COMPLETED') {
+      throw new ProblemError({
+        type: 'https://quiz.example/problems/profile-incomplete',
+        title: 'Profile incomplete',
+        status: 403,
+        code: 'PROFILE_INCOMPLETE',
+        detail: 'Complete onboarding before accessing administrative operations.',
+      });
+    }
+
     next();
   } catch (error) {
     next(error);

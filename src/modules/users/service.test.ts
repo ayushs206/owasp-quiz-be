@@ -966,6 +966,7 @@ describe('Users Module: Service and Routes', () => {
     const adminUserId = '11111111-1111-4111-a111-111111111111';
     const studentUserId = '22222222-2222-4222-a222-222222222222';
     const blockedAdminUserId = '33333333-3333-4333-a333-333333333333';
+    const incompleteAdminUserId = '44444444-4444-4444-a444-444444444444';
 
     async function createTokenForUser(sub: string, email: string): Promise<string> {
       return createToken({ sub, email });
@@ -1080,6 +1081,51 @@ describe('Users Module: Service and Routes', () => {
       expect(body.code).toBe('ACCOUNT_BLOCKED');
     });
 
+    it('Incomplete admin is denied with 403 PROFILE_INCOMPLETE', async () => {
+      const now = new Date();
+      const mockDb = createMockDb({
+        profiles: [
+          {
+            id: incompleteAdminUserId,
+            email: 'incomplete-admin@thapar.edu',
+            normalizedEmail: 'incomplete-admin@thapar.edu',
+            fullName: null,
+            rollNumber: null,
+            branchCode: null,
+            phoneE164: null,
+            role: 'ADMIN',
+            status: 'ACTIVE',
+            profileCompletedAt: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        enrollments: [
+          {
+            id: 'e-incomplete-admin',
+            quizId: 'q-incomplete-admin',
+            normalizedEmail: 'incomplete-admin@thapar.edu',
+            userId: incompleteAdminUserId,
+            rollNumber: '999900003',
+            branchCode: 'CSE',
+            rosterName: 'Incomplete Admin',
+            status: 'ELIGIBLE',
+            createdAt: now,
+          },
+        ],
+      });
+      const app = buildApp(mockDb);
+      const token = await createTokenForUser(incompleteAdminUserId, 'incomplete-admin@thapar.edu');
+
+      const response = await supertest(app)
+        .get('/v1/admin/users')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(403);
+      const body = response.body as ProblemBody;
+      expect(body.code).toBe('PROFILE_INCOMPLETE');
+    });
+
     it('Admin token listing users returns paginated data and nextCursor', async () => {
       const mockDb = createAdminMockDb();
       const app = buildApp(mockDb);
@@ -1096,6 +1142,20 @@ describe('Users Module: Service and Routes', () => {
       expect(Array.isArray(body.data)).toBe(true);
       expect(body.data.length).toBe(2);
       expect(body.nextCursor).not.toBeNull();
+
+      const secondResponse = await supertest(app)
+        .get(`/v1/admin/users?limit=2&cursor=${body.nextCursor}`)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(secondResponse.status).toBe(200);
+      const secondBody = secondResponse.body as AdminListUsersResponse;
+      expect(secondBody.data).toHaveLength(1);
+      expect(secondBody.nextCursor).toBeNull();
+      expect([...body.data, ...secondBody.data].map((profile) => profile.id)).toEqual([
+        adminUserId,
+        studentUserId,
+        blockedAdminUserId,
+      ]);
     });
 
     it('Admin token getting user detail returns single profile', async () => {

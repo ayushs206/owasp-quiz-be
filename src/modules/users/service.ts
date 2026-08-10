@@ -495,8 +495,8 @@ export async function adminListUsers(
 
   let nextCursor: string | null = null;
   if (profiles.length > query.limit) {
-    const nextItem = profiles.pop();
-    nextCursor = nextItem?.id ?? null;
+    profiles.pop();
+    nextCursor = profiles.at(-1)?.id ?? null;
   }
 
   return {
