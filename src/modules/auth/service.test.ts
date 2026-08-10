@@ -62,6 +62,7 @@ describe('Auth Service and Middleware', () => {
       email: 'student@thapar.edu',
       email_verified: true,
       app_metadata: { provider: 'google' },
+      amr: [{ method: 'oauth', timestamp: 1_723_000_000 }],
       ...claims,
     })
       .setProtectedHeader({ alg: 'RS256', kid: 'test-key-id' })
@@ -179,6 +180,22 @@ describe('Auth Service and Middleware', () => {
 
     it('rejects missing or non-Google provider with 401', async () => {
       const token = await createToken({ app_metadata: { provider: 'github' } });
+      await expect(verifyAuthToken(token, mockEnv, jwksFetcher)).rejects.toMatchObject({
+        status: 401,
+        code: 'UNAUTHORIZED',
+      });
+    });
+
+    it('rejects a Google account token without an OAuth session method', async () => {
+      const token = await createToken({ amr: [{ method: 'password', timestamp: 1_723_000_000 }] });
+      await expect(verifyAuthToken(token, mockEnv, jwksFetcher)).rejects.toMatchObject({
+        status: 401,
+        code: 'UNAUTHORIZED',
+      });
+    });
+
+    it('rejects a Google account token with a missing AMR claim', async () => {
+      const token = await createToken({ amr: [] });
       await expect(verifyAuthToken(token, mockEnv, jwksFetcher)).rejects.toMatchObject({
         status: 401,
         code: 'UNAUTHORIZED',
